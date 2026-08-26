@@ -1,0 +1,4 @@
+# 部署脚本强制 LF 行尾，避免 Windows 提交后在 macOS/Linux 上报 bad interpreter
+*.sh text eol=lf
+*.cjs text eol=lf
+*.ps1 text eol=lf

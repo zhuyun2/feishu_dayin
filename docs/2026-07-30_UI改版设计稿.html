@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>飞书打印插件 UI 改版设计稿</title>
+<style>
+  :root {
+    --primary: #3370ff;          /* 飞书蓝 */
+    --primary-weak: #e8f0ff;
+    --success: #34c724;
+    --warn: #ff8800;
+    --text-1: #1f2329;
+    --text-2: #646a73;
+    --text-3: #8f959e;
+    --border: #e5e6eb;
+    --bg-page: #f5f6f7;
+    --bg-card: #ffffff;
+    --radius: 10px;
+    --shadow: 0 1px 4px rgba(31,35,41,.06);
+  }
+  * { margin:0; padding:0; box-sizing:border-box; font-family:-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  body { background:#dde1e6; display:flex; gap:32px; justify-content:center; padding:32px; min-height:100vh; }
+  .phone { width:400px; background:var(--bg-page); border-radius:14px; overflow:hidden; box-shadow:0 8px 32px rgba(0,0,0,.18); display:flex; flex-direction:column; height:780px; }
+  .label { text-align:center; font-size:13px; color:#555; margin-top:10px; }
+  .wrap { display:flex; flex-direction:column; align-items:center; }
+
+  /* ===== 顶部:状态条 ===== */
+  .statusbar { background:var(--bg-card); padding:10px 16px; display:flex; align-items:center; gap:8px; border-bottom:1px solid var(--border); }
+  .status-dot { width:8px; height:8px; border-radius:50%; background:var(--success); flex:none; }
+  .status-txt { font-size:13px; color:var(--text-1); font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .status-sub { font-size:12px; color:var(--text-3); margin-left:auto; flex:none; }
+
+  /* ===== 主体 ===== */
+  .body { flex:1; overflow:auto; padding:12px; display:flex; flex-direction:column; gap:12px; }
+
+  /* 模板选择行:一行搞定,不再占一张大卡 */
+  .tpl-row { background:var(--bg-card); border-radius:var(--radius); box-shadow:var(--shadow); padding:12px; display:flex; align-items:center; gap:8px; }
+  .tpl-select { flex:1; display:flex; align-items:center; gap:8px; border:1px solid var(--border); border-radius:8px; padding:8px 12px; font-size:13px; color:var(--text-1); background:#fff; cursor:pointer; }
+  .tpl-select .icon { color:var(--primary); }
+  .tpl-select .caret { margin-left:auto; color:var(--text-3); font-size:10px; }
+  .badge { font-size:11px; color:var(--success); background:#e8fbe8; border-radius:4px; padding:2px 8px; flex:none; font-weight:500; }
+  .badge.excel { color:#1a7f37; background:#dcffe4; }
+
+  /* 预览区:占满剩余空间,工具条吸顶 */
+  .preview-card { background:var(--bg-card); border-radius:var(--radius); box-shadow:var(--shadow); flex:1; display:flex; flex-direction:column; overflow:hidden; min-height:300px; }
+  .preview-toolbar { display:flex; align-items:center; gap:6px; padding:8px 12px; border-bottom:1px solid var(--border); background:#fafbfc; }
+  .ptool-title { font-size:13px; font-weight:600; color:var(--text-1); margin-right:auto; }
+  .tool-btn { width:26px; height:26px; border:1px solid var(--border); background:#fff; border-radius:6px; display:flex; align-items:center; justify-content:center; font-size:13px; color:var(--text-2); cursor:pointer; }
+  .tool-btn:hover { color:var(--primary); border-color:var(--primary); }
+  .zoom-val { font-size:12px; color:var(--text-2); min-width:36px; text-align:center; }
+  .preview-body { flex:1; background:#eceef1; overflow:auto; display:flex; justify-content:center; padding:16px; }
+  .paper { background:#fff; width:300px; min-height:380px; box-shadow:0 2px 8px rgba(0,0,0,.12); padding:14px; font-size:8px; color:#333; }
+  .paper h4 { text-align:center; font-size:11px; margin-bottom:8px; }
+  .paper table { width:100%; border-collapse:collapse; }
+  .paper td { border:1px solid #999; padding:3px 4px; font-size:7.5px; }
+  .paper .hd { background:#f5f5f5; font-weight:600; }
+
+  /* 底部固定操作栏 */
+  .actionbar { background:var(--bg-card); border-top:1px solid var(--border); padding:10px 16px; display:flex; gap:10px; }
+  .btn { flex:1; height:38px; border-radius:8px; border:none; font-size:14px; font-weight:500; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:6px; }
+  .btn-primary { background:var(--primary); color:#fff; }
+  .btn-default { background:#fff; color:var(--text-1); border:1px solid var(--border); }
+  .btn-icon { flex:none; width:38px; }
+
+  /* 底部 Tab 导航(替代顶部 Tabs) */
+  .tabbar { display:flex; background:var(--bg-card); border-top:1px solid var(--border); }
+  .tab { flex:1; padding:8px 0 10px; text-align:center; font-size:11px; color:var(--text-3); cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:3px; }
+  .tab .ticon { font-size:18px; }
+  .tab.on { color:var(--primary); font-weight:600; }
+
+  /* ===== 模板管理页 ===== */
+  .search-row { display:flex; gap:8px; }
+  .search { flex:1; border:1px solid var(--border); border-radius:8px; padding:8px 12px; font-size:13px; color:var(--text-3); background:#fff; }
+  .btn-upload { background:var(--primary); color:#fff; border:none; border-radius:8px; padding:0 16px; font-size:13px; font-weight:500; cursor:pointer; }
+  .tpl-card { background:var(--bg-card); border-radius:var(--radius); box-shadow:var(--shadow); padding:12px; display:flex; align-items:center; gap:12px; }
+  .ficon { width:38px; height:38px; border-radius:8px; display:flex; align-items:center; justify-content:center; font-size:18px; flex:none; }
+  .ficon.word { background:#e8f0ff; color:#3370ff; }
+  .ficon.excel { background:#dcffe4; color:#1a7f37; }
+  .tpl-meta { flex:1; min-width:0; }
+  .tpl-name { font-size:13px; font-weight:500; color:var(--text-1); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tpl-desc { font-size:11px; color:var(--text-3); margin-top:2px; }
+  .tpl-acts { display:flex; gap:2px; flex:none; }
+  .act { width:28px; height:28px; border-radius:6px; display:flex; align-items:center; justify-content:center; color:var(--text-3); cursor:pointer; font-size:14px; }
+  .act:hover { background:var(--primary-weak); color:var(--primary); }
+  .act.danger:hover { background:#ffece8; color:#f54a45; }
+  .match-tip { font-size:12px; color:var(--text-2); background:var(--primary-weak); border-radius:8px; padding:10px 12px; display:flex; gap:8px; align-items:flex-start; line-height:1.5; }
+</style>
+</head>
+<body>
+
+<!-- ============ 屏1:打印主页 ============ -->
+<div class="wrap">
+  <div class="phone">
+    <div class="statusbar">
+      <div class="status-dot"></div>
+      <div class="status-txt">广州XX贸易公司 — 出货记录#0328</div>
+      <div class="status-sub">出货单表</div>
+    </div>
+
+    <div class="body">
+      <div class="tpl-row">
+        <div class="tpl-select">
+          <span class="icon">📄</span>
+          <span>迪新货单.xlsx</span>
+          <span class="caret">▼</span>
+        </div>
+        <span class="badge excel">自动匹配</span>
+      </div>
+
+      <div class="preview-card">
+        <div class="preview-toolbar">
+          <span class="ptool-title">预览 · 第1/1页</span>
+          <div class="tool-btn">−</div>
+          <div class="zoom-val">86%</div>
+          <div class="tool-btn">+</div>
+          <div class="tool-btn" title="适应宽度">⇔</div>
+          <div class="tool-btn" title="刷新">↻</div>
+        </div>
+        <div class="preview-body">
+          <div class="paper">
+            <h4>广东迪美新材料科技有限公司销售出货单</h4>
+            <div style="display:flex;justify-content:space-between;font-size:7.5px;margin-bottom:4px;">
+              <span>开单日期：2026-07-30</span><span>单号：DX20260730-001</span>
+            </div>
+            <table>
+              <tr><td class="hd">购货单位</td><td colspan="3">广州XX贸易有限公司</td><td class="hd">订单合同号</td><td>HT-2026-0728</td></tr>
+              <tr class="hd"><td>编码</td><td>货品名称</td><td>规格</td><td>单位</td><td>数量</td><td>金额</td></tr>
+              <tr><td>DM-101</td><td>银离子抗菌剂</td><td>25kg/桶</td><td>桶</td><td>10</td><td>12,000</td></tr>
+              <tr><td>DM-205</td><td>去屑剂复配物</td><td>25kg/桶</td><td>桶</td><td>5</td><td>8,500</td></tr>
+              <tr><td>DM-330</td><td>除螨精油</td><td>1kg/瓶</td><td>瓶</td><td>20</td><td>6,000</td></tr>
+              <tr><td class="hd" colspan="4">合计</td><td>35</td><td>26,500</td></tr>
+              <tr><td class="hd">备注</td><td colspan="5">送货方式：□公司送货 □物流 □自提</td></tr>
+              <tr><td class="hd">客户签名</td><td colspan="2"></td><td class="hd">业务员</td><td colspan="2">王红生</td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="actionbar">
+      <button class="btn btn-primary">🖨 打印</button>
+      <button class="btn btn-default">⬇ 下载</button>
+      <button class="btn btn-default btn-icon" title="更多">⋯</button>
+    </div>
+
+    <div class="tabbar">
+      <div class="tab on"><span class="ticon">🖨</span>打印</div>
+      <div class="tab"><span class="ticon">📁</span>模板</div>
+      <div class="tab"><span class="ticon">✏️</span>编辑</div>
+      <div class="tab"><span class="ticon">🏷</span>变量</div>
+    </div>
+  </div>
+  <div class="label">屏1 · 打印主页(预览为核心,底部固定操作)</div>
+</div>
+
+<!-- ============ 屏2:模板管理 ============ -->
+<div class="wrap">
+  <div class="phone">
+    <div class="statusbar">
+      <div class="status-dot"></div>
+      <div class="status-txt">模板库 · 出货单表</div>
+      <div class="status-sub">4 个模板</div>
+    </div>
+
+    <div class="body">
+      <div class="search-row">
+        <input class="search" value="" placeholder="🔍 搜索模板…" />
+        <button class="btn-upload">＋ 上传</button>
+      </div>
+
+      <div class="match-tip">
+        <span>⚙️</span>
+        <span>自动匹配字段:<b>产品类型</b> — 打开记录时自动按该字段值选择同名模板。<a style="color:var(--primary)">修改</a></span>
+      </div>
+
+      <div class="tpl-card">
+        <div class="ficon excel">X</div>
+        <div class="tpl-meta">
+          <div class="tpl-name">迪新货单.xlsx</div>
+          <div class="tpl-desc">Excel · 11KB · 今天 13:52 · ✅ 占位符 12/12 匹配</div>
+        </div>
+        <div class="tpl-acts">
+          <div class="act" title="预览">👁</div>
+          <div class="act" title="下载">⬇</div>
+          <div class="act" title="复制">⧉</div>
+          <div class="act danger" title="删除">🗑</div>
+        </div>
+      </div>
+
+      <div class="tpl-card">
+        <div class="ficon word">W</div>
+        <div class="tpl-meta">
+          <div class="tpl-name">Antimicro 苯氧乙.docx</div>
+          <div class="tpl-desc">Word · 24KB · 07-27 · ⚠️ 2 个占位符无匹配字段</div>
+        </div>
+        <div class="tpl-acts">
+          <div class="act">👁</div><div class="act">⬇</div><div class="act">⧉</div><div class="act danger">🗑</div>
+        </div>
+      </div>
+
+      <div class="tpl-card">
+        <div class="ficon word">W</div>
+        <div class="tpl-meta">
+          <div class="tpl-name">出货单-标准版.docx</div>
+          <div class="tpl-desc">Word · 18KB · 07-25 · ✅ 占位符全部匹配</div>
+        </div>
+        <div class="tpl-acts">
+          <div class="act">👁</div><div class="act">⬇</div><div class="act">⧉</div><div class="act danger">🗑</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tabbar">
+      <div class="tab"><span class="ticon">🖨</span>打印</div>
+      <div class="tab on"><span class="ticon">📁</span>模板</div>
+      <div class="tab"><span class="ticon">✏️</span>编辑</div>
+      <div class="tab"><span class="ticon">🏷</span>变量</div>
+    </div>
+  </div>
+  <div class="label">屏2 · 模板管理(卡片式,类型图标+占位符体检)</div>
+</div>
+
+</body>
+</html>

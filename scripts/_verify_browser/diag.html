@@ -1,0 +1,115 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>position diagnose</title>
+<style>
+  body { margin:0; font-family: monospace; }
+  #info { padding:8px; font-size:11px; background:#fef3c7; border:1px solid #f59e0b; }
+  .container { transform: scale(1); transform-origin: top center; }
+  /* match DocxPreview's outer scroll container width */
+  .container { width: 794px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<div id="info">loading...</div>
+<div class="container" id="container"></div>
+<script type="module">
+import { renderAsync } from 'https://cdn.jsdelivr.net/npm/docx-preview@0.1.15/+esm';
+import { injectHeaderFallback, __test_parseHeader } from '/scripts/_verify_browser/docxHeaderFallback.js';
+
+const params = new URLSearchParams(location.search);
+const file = params.get('file') || '10%卡松+货CJ-2-测试模版.docx';
+
+const info = document.getElementById('info');
+const container = document.getElementById('container');
+
+(async () => {
+  const url = `/templates/tbldeXFrTixlf6sB/${encodeURIComponent(file)}`;
+  const resp = await fetch(url);
+  const blob = await resp.blob();
+  info.textContent = `loaded: ${file} (${blob.size} bytes)`;
+
+  // parse header anchors for diagnostic
+  const anchors = await __test_parseHeader(blob);
+  info.textContent += `\n\nParsed anchors:\n` + JSON.stringify(anchors, null, 2);
+
+  await renderAsync(blob, container, undefined, {
+    className: 'docx', inWrapper: true, breakPages: true,
+    ignoreWidth: false, ignoreHeight: false, ignoreFonts: false,
+    useBase64URL: true, experimental: true,
+  });
+
+  // Wait for layout
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+  const section = container.querySelector('section.docx');
+  const header = section.querySelector('header');
+  const cs = getComputedStyle(section);
+  const sectionRect = section.getBoundingClientRect();
+  const layoutW = section.offsetWidth;
+  const layoutH = section.offsetHeight;
+  const scale = sectionRect.width / layoutW;
+
+  let info2 = `\n\nSection metrics:`;
+  info2 += `\n  offsetWidth x offsetHeight (layout): ${layoutW} x ${layoutH}`;
+  info2 += `\n  rect (rendered): ${sectionRect.width.toFixed(1)} x ${sectionRect.height.toFixed(1)}`;
+  info2 += `\n  scale: ${scale.toFixed(4)}`;
+  info2 += `\n  padding-left: ${cs.paddingLeft}, padding-top: ${cs.paddingTop}`;
+  info2 += `\n  padding-right: ${cs.paddingRight}, padding-bottom: ${cs.paddingBottom}`;
+  info2 += `\n  border-left: ${cs.borderLeftWidth}, border-top: ${cs.borderTopWidth}`;
+  info2 += `\n  position: ${cs.position}`;
+
+  if (header) {
+    const hr = header.getBoundingClientRect();
+    const hcs = getComputedStyle(header);
+    info2 += `\n\nHeader metrics:`;
+    info2 += `\n  rect (rendered): left=${hr.left.toFixed(1)} top=${hr.top.toFixed(1)} width=${hr.width.toFixed(1)} height=${hr.height.toFixed(1)}`;
+    info2 += `\n  offsetWidth x offsetHeight: ${header.offsetWidth} x ${header.offsetHeight}`;
+    info2 += `\n  position: ${hcs.position}, margin-top: ${hcs.marginTop}, padding-top: ${hcs.paddingTop}`;
+    info2 += `\n  layout top (in section local): ${(hr.top - sectionRect.top).toFixed(1)}`;
+    info2 += `\n  children: ${header.children.length}`;
+    for (let i = 0; i < header.children.length; i++) {
+      const c = header.children[i];
+      const cr = c.getBoundingClientRect();
+      info2 += `\n    [${i}] ${c.tagName}.${c.className} text="${(c.textContent || '').slice(0,30)}" top=${(cr.top - sectionRect.top).toFixed(1)} left=${(cr.left - sectionRect.left).toFixed(1)} h=${cr.height.toFixed(1)}`;
+    }
+  } else {
+    info2 += `\n\nNO <header> FOUND in section!`;
+  }
+
+  // Find any native floats still rendered
+  const svgs = section.querySelectorAll('svg');
+  const imgsInHeader = header ? header.querySelectorAll('img') : [];
+  const nativeFloats = header ? header.querySelectorAll('header svg, header img, header [style*="position:absolute"]') : [];
+  info2 += `\n\nNative elements in header BEFORE fallback:`;
+  info2 += `\n  svg: ${svgs.length}, imgs in header: ${imgsInHeader.length}, all native floats: ${nativeFloats.length}`;
+
+  info.textContent += info2;
+
+  // Now run fallback
+  await injectHeaderFallback(blob, container);
+
+  // re-measure after fallback
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const fb = container.querySelector('.docx-header-fallback');
+  if (fb) {
+    const fbr = fb.getBoundingClientRect();
+    info.textContent += `\n\nFallback layer rect: left=${fbr.left.toFixed(1)} top=${fbr.top.toFixed(1)} w=${fbr.width.toFixed(1)} h=${fbr.height.toFixed(1)}`;
+    for (const ch of fb.children) {
+      const r = ch.getBoundingClientRect();
+      const localLeft = r.left - sectionRect.left;
+      const localTop = r.top - sectionRect.top;
+      const layoutLeft = localLeft / scale;
+      const layoutTop = localTop / scale;
+      const layoutW2 = r.width / scale;
+      const layoutH2 = r.height / scale;
+      info.textContent += `\n  child ${ch.dataset.fallbackType}: rendered left=${localLeft.toFixed(1)} top=${localTop.toFixed(1)} w=${r.width.toFixed(1)} h=${r.height.toFixed(1)} | LAYOUT: left=${layoutLeft.toFixed(1)} top=${layoutTop.toFixed(1)} w=${layoutW2.toFixed(1)} h=${layoutH2.toFixed(1)}`;
+    }
+  } else {
+    info.textContent += `\n\nNO FALLBACK LAYER`;
+  }
+})();
+</script>
+</body>
+</html>

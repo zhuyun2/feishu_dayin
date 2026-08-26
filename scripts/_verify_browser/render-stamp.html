@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>stamp render verify</title>
+<style>
+  body { margin:0; background:#eceef1; font-family: monospace; }
+  #info { padding:8px; font-size:11px; background:#fef3c7; }
+  .container { width: 794px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<div id="info">loading...</div>
+<div class="container" id="container"></div>
+<script type="module">
+import { renderAsync } from 'https://cdn.jsdelivr.net/npm/docx-preview@0.1.15/+esm';
+
+const params = new URLSearchParams(location.search);
+const file = params.get('file') || '_stamped-test-柏舒逸 Bersulli.docx';
+const info = document.getElementById('info');
+const container = document.getElementById('container');
+
+(async () => {
+  const url = `/templates/tbldeXFrTixlf6sB/${encodeURIComponent(file)}`;
+  const resp = await fetch(url);
+  const blob = await resp.blob();
+  info.textContent = `loaded: ${file} (${blob.size} bytes), rendering...`;
+  await renderAsync(blob, container, undefined, {
+    className: 'docx', inWrapper: true, breakPages: true,
+    ignoreWidth: false, ignoreHeight: false, ignoreFonts: false,
+    useBase64URL: true, experimental: true,
+  });
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  // 等图片（印章）真正加载
+  await new Promise(r => setTimeout(r, 800));
+  const imgs = Array.from(container.querySelectorAll('img')).map(i => ({
+    src: (i.src || '').slice(0, 40),
+    w: i.naturalWidth, h: i.naturalHeight,
+    rect: i.getBoundingClientRect() ? `${Math.round(i.getBoundingClientRect().x)},${Math.round(i.getBoundingClientRect().y)} ${Math.round(i.getBoundingClientRect().width)}x${Math.round(i.getBoundingClientRect().height)}` : 'n/a',
+  }));
+  const section = container.querySelector('section.docx');
+  info.textContent = `rendered OK. section=${section ? section.offsetWidth + 'x' + section.offsetHeight : 'MISSING'}\n\nimages:\n` + JSON.stringify(imgs, null, 2);
+  document.body.dataset.done = '1';
+})();
+</script>
+</body>
+</html>

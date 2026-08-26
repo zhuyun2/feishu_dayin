@@ -1,0 +1,14 @@
+# 依赖与构建产物
+node_modules/
+dist/
+*.log
+
+# 本地开发/调试配置（浏览器预览工具生成，与部署无关）
+.claude/
+
+# 保留模板库与匹配配置（本地部署直接调用）
+!templates/
+!templates/**
+
+# pm2 进程配置（deploy.sh 按本地端口生成，不提交）
+ecosystem.config.cjs
