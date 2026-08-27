@@ -3,12 +3,15 @@ import { renderAsync } from 'docx-preview';
 
 import { injectHeaderFallback } from '../services/docxHeaderFallback';
 import { overlayStampsOnDoc, type OverlayStamp, type OverlayResult } from '../services/stampOverlay';
+import { hideEmptySections } from '../utils/print';
 import type { StampConfig, StampAnchor } from '../types';
 
 type Orientation = 'auto' | 'portrait' | 'landscape';
 
 export interface PreviewHandle {
   fitWidth: () => void;
+  // 获取当前渲染容器，供打印时直接克隆预览 DOM，确保打印输出与预览一致
+  getContainer: () => HTMLDivElement | null;
 }
 
 interface Props {
@@ -60,7 +63,7 @@ const DocxPreview = forwardRef<PreviewHandle, Props>(function DocxPreview(
     onScaleChange(clampScale(avail / pageW));
   }, [onScaleChange]);
 
-  useImperativeHandle(ref, () => ({ fitWidth }), [fitWidth]);
+  useImperativeHandle(ref, () => ({ fitWidth, getContainer: () => containerRef.current }), [fitWidth]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -95,6 +98,8 @@ const DocxPreview = forwardRef<PreviewHandle, Props>(function DocxPreview(
         if (overlayRes && anchorCbRef.current) {
           anchorCbRef.current(overlayRes.anchor ?? null, overlayRes.anchorFromText);
         }
+        // 多 section 文档：隐藏只含页眉页脚的空页
+        if (el.ownerDocument) hideEmptySections(el.ownerDocument);
         setHasContent(true);
         requestAnimationFrame(() => fitWidth());
       } catch (e: any) {

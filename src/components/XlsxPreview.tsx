@@ -30,7 +30,7 @@ const XlsxPreview = forwardRef<PreviewHandle, Props>(function XlsxPreview(
     onScaleChange(clampScale(avail / pageW));
   }, [onScaleChange]);
 
-  useImperativeHandle(ref, () => ({ fitWidth }), [fitWidth]);
+  useImperativeHandle(ref, () => ({ fitWidth, getContainer: () => containerRef.current }), [fitWidth]);
 
   useEffect(() => {
     const el = containerRef.current;

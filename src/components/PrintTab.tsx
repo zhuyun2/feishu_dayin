@@ -19,7 +19,7 @@ import type { OverlayStamp } from '../services/stampOverlay';
 import { resolveAutoSelection } from '../services/templateMatch';
 import { createRequestGate } from '../services/requestGate';
 import { currentPreviewBlob } from '../services/previewBlob';
-import { printDocxBlob, printHtmlTable, printCopies, type PrintOrientation, type PrintOverlay } from '../utils/print';
+import { printDocxBlob, printHtmlTable, printCopies, printPreviewElement, printDocxAsPdf, type PrintOrientation, type PrintOverlay } from '../utils/print';
 import { renderXlsxToHtml } from '../services/xlsxRender';
 import DocxPreview, {
   MIN_SCALE, MAX_SCALE, SCALE_STEP, clampScale, type PreviewHandle,
@@ -325,6 +325,38 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
           await printHtmlTable(html, orientation);
         }
         return;
+      }
+      // 单份 docx：优先走「服务端 LibreOffice 转 PDF」打印，分页/页眉页脚与 Word 打开模板一致。
+      // 印章按下载语义注入（Word 浮动图片），再上传转换，PDF 里即带正确位置的章。
+      if (!multiCopy) {
+        try {
+          let pdfSrc = blob;
+          const cfg = stampConfigRef.current;
+          const pick = cfg.stamps.filter((n) => stamps.some((s) => s.name === n));
+          if (pick.length > 0) {
+            try {
+              const imgs = await Promise.all(
+                pick.map(async (n) => ({
+                  name: n,
+                  base64: arrayBufferToBase64(await fetchStampBuffer(active.tableId!, n)),
+                }))
+              );
+              pdfSrc = await stampDocxBlob(blob, imgs, cfg);
+            } catch (se: any) {
+              message.warning('印章注入失败，本次打印未盖章：' + (se?.message || se));
+            }
+          }
+          await printDocxAsPdf(pdfSrc);
+          return;
+        } catch (pdfErr: any) {
+          // 服务端未装 LibreOffice / 转换失败：降级为浏览器 HTML 打印（预览 DOM 直打）
+          message.warning('PDF 打印不可用，已降级为浏览器打印：' + (pdfErr?.message || pdfErr));
+          const previewContainer = previewRef.current?.getContainer();
+          if (previewContainer && previewContainer.querySelector('section.docx')) {
+            await printPreviewElement(previewContainer, orientation);
+            return;
+          }
+        }
       }
       const overlay = await buildOverlay();
       if (multiCopy) {

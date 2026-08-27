@@ -45,9 +45,17 @@ module.exports = {
     open: false,
     hot: true,
     allowedHosts: 'all',
+    // 禁止浏览器缓存 bundle：插件迭代频繁，无 Cache-Control 头时浏览器启发式
+    // 缓存会一直用旧版 JS，导致打印修复"看不到效果"。
+    headers: {
+      'Cache-Control': 'no-store, max-age=0',
+      Pragma: 'no-cache',
+    },
     setupMiddlewares(middlewares, devServer) {
       // 挂载模板/配置 API（devServer.app 即 express 实例）
       require('./server/templateApi')(devServer.app);
+      // 挂载 docx → PDF 转换 API（LibreOffice，保证打印分页与 Word 一致）
+      require('./server/pdfApi')(devServer.app);
       return middlewares;
     },
   },

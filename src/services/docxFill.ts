@@ -1,7 +1,7 @@
 import PizZip from 'pizzip';
 import Docxtemplater from 'docxtemplater';
 import type { PrintDataValue, LinkedRow } from '../types';
-import { extractParagraphs, setParagraphText, getBodyParts, PAGE_BREAK } from './docxText';
+import { extractParagraphs, setParagraphText, getBodyParts, PAGE_BREAK, trimTrailingEmptyParagraphsInZip } from './docxText';
 import { amountToChinese } from './money';
 
 const MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -87,7 +87,10 @@ function renderToZip(zip: PizZip, data: Record<string, PrintDataValue>): PizZip 
     nullGetter: () => '',
   });
   doc.render(data);
-  return doc.getZip();
+  const rendered = doc.getZip();
+  // 渲染后清理末尾空段落，避免不同软件排版遗留的空白页
+  trimTrailingEmptyParagraphsInZip(rendered);
+  return rendered;
 }
 
 // 把多页渲染结果合并为一个 docx：每页之间插入分页符，保留首页的 sectPr（含页眉页脚引用）
@@ -101,6 +104,8 @@ function mergeDocsZip(zips: PizZip[]): PizZip {
     baseXml = baseXml.replace(/<w:body>[\s\S]*<\/w:body>/, `<w:body>${newInner}</w:body>`);
   }
   zips[0].file('word/document.xml', baseXml);
+  // 合并后的文档末尾也可能遗留空段落
+  trimTrailingEmptyParagraphsInZip(zips[0]);
   return zips[0];
 }
 
