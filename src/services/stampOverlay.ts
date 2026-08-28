@@ -25,7 +25,17 @@ export interface OverlayStamp {
 export interface OverlayResult {
   anchorFound: boolean;      // 是否拿到了锚点（本次查找或上次保存）
   anchorFromText: boolean;   // 本次是否在 DOM 中实时找到了锚定文字
-  anchor?: StampAnchor;      // 实际使用的锚点（页面百分比）
+  anchor?: StampAnchor;      // 实际使用的锚点（页面百分比，单页/兼容兜底）
+  pages?: PageOverlayResult[]; // 逐页叠加结果（多页模板）
+}
+
+// 单页叠加结果（多页模板逐页上报，供调用方按页持久化 enabled/anchor）
+export interface PageOverlayResult {
+  pageIndex: number;         // 0-based 页索引（对应可见 section 顺序）
+  enabled: boolean;          // 该页实际是否盖章
+  anchorFound: boolean;      // 该页是否拿到了锚点（本次查找或上次保存）
+  anchorFromText: boolean;   // 该页是否在 DOM 中实时找到了锚定文字
+  anchor?: StampAnchor;      // 该页实际使用的锚点（页面百分比）
 }
 
 // 通过魔数识别 base64 图片 MIME（PNG / JPEG），缺省按 PNG
@@ -129,10 +139,12 @@ function overlayOnSection(
   });
 }
 
-// 主入口：向渲染后的容器叠加印章。
-// - 预设模式：盖在最后一页
-// - 锚定模式：从最后一页往前找锚定文字，盖在文字所在的那一页（整体取最后一个匹配，
-//   签名/盖章栏一般位于文档后部）；DOM 中找不到时退回上次保存的 anchor（仍盖最后一页）
+// 主入口：向渲染后的容器按页叠加印章（多页模板每页独立控制）。
+// - 每页盖章开关：config.pages[i].enabled === false 则该页不盖（默认全部盖章）
+// - 预设模式：每页盖在 position 预设位置（叠加 offsetX/offsetY，多枚向下错开）
+// - 锚定模式（anchorText 非空）：每页独立查找锚定文字，盖在文字所在位置；
+//   某页 DOM 中找不到时退回该页已保存的 pages[i].anchor，再退回全局 config.anchor
+//   （仍盖在该页预设位置），并标记 anchorFound=false 供调用方提示。
 export function overlayStampsOnDoc(
   container: HTMLElement,
   stamps: OverlayStamp[],
@@ -140,32 +152,49 @@ export function overlayStampsOnDoc(
 ): OverlayResult {
   const result: OverlayResult = { anchorFound: false, anchorFromText: false };
   if (!stamps.length) return result;
-  const sections = Array.from(container.querySelectorAll('section.docx')) as HTMLElement[];
+  const sections = Array.from(container.querySelectorAll('section.docx'))
+    .filter((s) => !s.classList.contains('empty-page-hidden')) as HTMLElement[];
   if (!sections.length) return result;
 
-  let target = sections[sections.length - 1];
-  let anchor: StampAnchor | undefined;
+  const pages: PageOverlayResult[] = [];
+  let anyAnchor = false;
+  let anyFromText = false;
+  let lastAnchor: StampAnchor | undefined;
 
-  if (config.anchorText?.trim()) {
-    for (let s = sections.length - 1; s >= 0; s--) {
-      const hit = findTextInSection(sections[s], config.anchorText);
+  sections.forEach((section, i) => {
+    const pageCfg = config.pages?.[i];
+    const enabled = pageCfg?.enabled !== false;
+    const pr: PageOverlayResult = { pageIndex: i, enabled, anchorFound: false, anchorFromText: false };
+    pages.push(pr);
+    if (!enabled) return;
+
+    let anchor: StampAnchor | undefined;
+    if (config.anchorText?.trim()) {
+      const hit = findTextInSection(section, config.anchorText);
       if (hit) {
         anchor = hit;
-        target = sections[s];
-        result.anchorFound = true;
-        result.anchorFromText = true;
-        break;
+        pr.anchorFound = true;
+        pr.anchorFromText = true;
+        pr.anchor = hit;
+      } else if (pageCfg?.anchor) {
+        anchor = pageCfg.anchor;
+        pr.anchorFound = true;
+        pr.anchor = pageCfg.anchor;
+      } else if (config.anchor) {
+        anchor = config.anchor;
+        pr.anchorFound = true;
       }
     }
-    if (!anchor && config.anchor) {
-      // 渲染 DOM 中没找到（如打印 iframe 里被拆分），退回上次保存的锚点
-      anchor = config.anchor;
-      result.anchorFound = true;
-    }
-  }
 
-  if (anchor) result.anchor = anchor;
-  overlayOnSection(target, stamps, config, anchor);
+    overlayOnSection(section, stamps, config, anchor);
+    if (pr.anchorFound) { anyAnchor = true; lastAnchor = anchor; }
+    if (pr.anchorFromText) anyFromText = true;
+  });
+
+  result.pages = pages;
+  result.anchorFound = anyAnchor;
+  result.anchorFromText = anyFromText;
+  result.anchor = lastAnchor;
   return result;
 }
 

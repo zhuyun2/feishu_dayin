@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Checkbox, Input, Select, Slider, Space, Spin, Tag, Tooltip, Typography, message } from 'antd';
+import { Alert, Button, Checkbox, Input, Select, Slider, Space, Spin, Switch, Tag, Tooltip, Typography, message } from 'antd';
 import {
   PrinterOutlined, DownloadOutlined, ReloadOutlined, RotateRightOutlined,
   ZoomInOutlined, ZoomOutOutlined, ColumnWidthOutlined,
 } from '@ant-design/icons';
 import { saveAs } from 'file-saver';
 
-import type { TemplateInfo, MatchConfig, MatchKind, StampAnchor, StampConfig, StampInfo } from '../types';
+import type { TemplateInfo, MatchConfig, MatchKind, StampConfig, StampInfo, StampPageSetting } from '../types';
 import { DEFAULT_STAMP_CONFIG, STAMP_POSITION_LABEL } from '../types';
 import type { ActiveRecordState } from '../hooks/useActiveRecord';
 import { fetchTemplateBuffer } from '../services/templateApi';
@@ -15,11 +15,14 @@ import { buildPrintData } from '../services/dataBuilder';
 import { fillTemplate, explainDocxError } from '../services/docxFill';
 import { fillXlsx, isXlsxName } from '../services/xlsxFill';
 import { stampDocxBlob, arrayBufferToBase64 } from '../services/docxStamp';
-import type { OverlayStamp } from '../services/stampOverlay';
+import type { OverlayStamp, PageOverlayResult } from '../services/stampOverlay';
 import { resolveAutoSelection } from '../services/templateMatch';
 import { createRequestGate } from '../services/requestGate';
 import { currentPreviewBlob } from '../services/previewBlob';
-import { printDocxBlob, printHtmlTable, printCopies, printPreviewElement, printDocxAsPdf, type PrintOrientation, type PrintOverlay } from '../utils/print';
+import {
+  printDocxBlob, printHtmlTable, printCopies, printPreviewElement,
+  type PrintOrientation, type PrintOverlay,
+} from '../utils/print';
 import { renderXlsxToHtml } from '../services/xlsxRender';
 import DocxPreview, {
   MIN_SCALE, MAX_SCALE, SCALE_STEP, clampScale, type PreviewHandle,
@@ -66,6 +69,7 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
   const [multiCopy, setMultiCopy] = useState(false);
   const DEFAULT_COPIES = ['生产部', '销售部', '客户', '财务部', '开票'];
   const [rendering, setRendering] = useState(false);
+  const [printing, setPrinting] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [scale, setScale] = useState(1);
@@ -130,29 +134,42 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
     }
   }, [stampConfig, stampCfgKey]);
 
-  // 锚定文字定位结果：写回配置持久化（下载注入 posOffset 复用同一坐标）
+  // 锚定文字定位结果：按页写回配置持久化（下载注入 posOffset 复用同一坐标）
   const anchorWarnRef = useRef('');
-  const handleStampAnchor = useCallback((a: StampAnchor | null, fromText: boolean) => {
+  // 当前可见页数（预览渲染后由 DocxPreview 上报，用于渲染「盖章页面」开关组）
+  const [stampPageCount, setStampPageCount] = useState(1);
+  const handlePageCount = useCallback((n: number) => {
+    setStampPageCount((prev) => (prev === n ? prev : n));
+  }, []);
+  const handleStampAnchors = useCallback((results: PageOverlayResult[]) => {
     const cfg = stampConfigRef.current;
     if (!cfg.anchorText?.trim()) {
       anchorWarnRef.current = '';
       return;
     }
-    if (!fromText) {
-      // 渲染 DOM 中没找到文字：退回上次保存的 anchor 或位置预设，提示一次
-      if (anchorWarnRef.current !== cfg.anchorText) {
-        anchorWarnRef.current = cfg.anchorText;
-        message.warning(`未在文档中找到「${cfg.anchorText}」，印章先用上次位置/位置预设`);
-      }
-      return;
-    }
-    anchorWarnRef.current = '';
-    if (!a) return;
     setStampConfig((c) => {
-      // 与已存锚点差异极小则不更新，避免 渲染→写回→再渲染 的循环
-      if (c.anchor && Math.abs(c.anchor.x - a.x) < 0.3 && Math.abs(c.anchor.y - a.y) < 0.3) return c;
-      return { ...c, anchor: a };
+      let changed = false;
+      const pages: Record<number, StampPageSetting> = { ...(c.pages || {}) };
+      results.forEach((r) => {
+        if (!r.anchorFromText || !r.anchor) return; // 只在实时定位成功时更新该页锚点
+        const cur = pages[r.pageIndex] || {};
+        if (
+          cur.anchor &&
+          Math.abs(cur.anchor.x - r.anchor.x) < 0.3 &&
+          Math.abs(cur.anchor.y - r.anchor.y) < 0.3
+        ) return; // 与已存锚点差异极小则不更新，避免 渲染→写回→再渲染 的循环
+        pages[r.pageIndex] = { ...cur, anchor: r.anchor };
+        changed = true;
+      });
+      return changed ? { ...c, pages } : c;
     });
+    // 汇总提示：启用盖章但该页找不到锚定文字（且无已存锚点）的页
+    const missing = results.filter((r) => r.enabled && !r.anchorFromText && !r.anchorFound);
+    if (missing.length > 0 && anchorWarnRef.current !== cfg.anchorText) {
+      anchorWarnRef.current = cfg.anchorText;
+      const pages = missing.map((r) => `第${r.pageIndex + 1}页`).join('、');
+      message.warning(`「${cfg.anchorText}」在 ${pages} 未找到，这些页按上次位置/位置预设盖章`);
+    }
   }, []);
 
   const autoMatchContext = [
@@ -314,9 +331,11 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
   };
 
   const handlePrint = async () => {
-    const blob = safePreviewBlob || (await generate());
-    if (!blob) return;
+    if (printing) return;
+    setPrinting(true);
     try {
+      const blob = safePreviewBlob || (await generate());
+      if (!blob) return;
       if (isXlsx) {
         const html = await renderXlsxToHtml(blob);
         if (multiCopy) {
@@ -326,36 +345,14 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
         }
         return;
       }
-      // 单份 docx：优先走「服务端 LibreOffice 转 PDF」打印，分页/页眉页脚与 Word 打开模板一致。
-      // 印章按下载语义注入（Word 浮动图片），再上传转换，PDF 里即带正确位置的章。
+      // 单份 docx：直接打印已渲染好的中文预览 DOM。
+      // 飞书 WebView 对隐藏 PDF iframe 的字体处理不稳定，会导致系统打印预览中文乱码；
+      // DOM 打印仍只唤起原打印弹窗，并保留预览中的页眉、页脚、分页和印章。
       if (!multiCopy) {
-        try {
-          let pdfSrc = blob;
-          const cfg = stampConfigRef.current;
-          const pick = cfg.stamps.filter((n) => stamps.some((s) => s.name === n));
-          if (pick.length > 0) {
-            try {
-              const imgs = await Promise.all(
-                pick.map(async (n) => ({
-                  name: n,
-                  base64: arrayBufferToBase64(await fetchStampBuffer(active.tableId!, n)),
-                }))
-              );
-              pdfSrc = await stampDocxBlob(blob, imgs, cfg);
-            } catch (se: any) {
-              message.warning('印章注入失败，本次打印未盖章：' + (se?.message || se));
-            }
-          }
-          await printDocxAsPdf(pdfSrc);
+        const previewContainer = previewRef.current?.getContainer();
+        if (previewContainer && previewContainer.querySelector('section.docx')) {
+          await printPreviewElement(previewContainer, orientation);
           return;
-        } catch (pdfErr: any) {
-          // 服务端未装 LibreOffice / 转换失败：降级为浏览器 HTML 打印（预览 DOM 直打）
-          message.warning('PDF 打印不可用，已降级为浏览器打印：' + (pdfErr?.message || pdfErr));
-          const previewContainer = previewRef.current?.getContainer();
-          if (previewContainer && previewContainer.querySelector('section.docx')) {
-            await printPreviewElement(previewContainer, orientation);
-            return;
-          }
         }
       }
       const overlay = await buildOverlay();
@@ -366,6 +363,8 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
       }
     } catch (e: any) {
       message.error(e?.message || '打印失败');
+    } finally {
+      setPrinting(false);
     }
   };
 
@@ -517,9 +516,36 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
               {stampConfig.anchorText?.trim() ? (
                 <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.5, marginTop: -4 }}>
                   已按「{stampConfig.anchorText.trim()}」文字定位{stampConfig.anchor ? '（已记住该模板位置）' : ''}；
-                  下方左右/上下滑杆可在此基础上微调，清空输入框则改用位置预设。
+                  多页模板每页独立查找该文字并分别记忆位置，下方左右/上下滑杆在此基础上统一微调，清空输入框则改用位置预设。
                 </Text>
               ) : null}
+
+              {/* 盖章页面：多页模板按页控制开关（页数来自预览渲染） */}
+              {stampPageCount > 1 && (
+                <div>
+                  <div style={{ fontSize: 12, color: '#646a73', marginBottom: 6 }}>
+                    盖章页面（多页模板按页控制；锚定模式下每页自动定位「{stampConfig.anchorText?.trim() || '锚定文字'}」）
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 14px' }}>
+                    {Array.from({ length: stampPageCount }, (_, i) => {
+                      const enabled = stampConfig.pages?.[i]?.enabled !== false;
+                      return (
+                        <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                          <Switch
+                            size="small"
+                            checked={enabled}
+                            onChange={(v) => setStampConfig((c) => ({
+                              ...c,
+                              pages: { ...(c.pages || {}), [i]: { ...(c.pages?.[i] || {}), enabled: v } },
+                            }))}
+                          />
+                          <span style={{ fontSize: 12, color: enabled ? '#1f2329' : '#8f959e' }}>第{i + 1}页</span>
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ fontSize: 12, color: '#646a73', width: 48, flexShrink: 0 }}>大小</span>
@@ -666,7 +692,7 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
             <Spin spinning={rendering} tip="正在生成预览…" wrapperClassName="preview-spin" style={{ width: '100%' }}>
               {isXlsx
                 ? <XlsxPreview ref={previewRef} blob={safePreviewBlob} scale={scale} onScaleChange={handleScaleChange} onError={handlePreviewError} />
-                : <DocxPreview ref={previewRef} blob={safePreviewBlob} orientation={orientation} scale={scale} onScaleChange={handleScaleChange} onError={handlePreviewError} overlayStamps={overlayStamps} overlayConfig={stampConfig} onStampAnchor={handleStampAnchor} />}
+                : <DocxPreview ref={previewRef} blob={safePreviewBlob} orientation={orientation} scale={scale} onScaleChange={handleScaleChange} onError={handlePreviewError} overlayStamps={overlayStamps} overlayConfig={stampConfig} onStampAnchors={handleStampAnchors} onPageCount={handlePageCount} />}
             </Spin>
           </div>
         </div>
@@ -678,9 +704,10 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
           type="primary"
           style={{ flex: 1, height: 38, borderRadius: 8, fontSize: 14, fontWeight: 500 }}
           onClick={handlePrint}
-          disabled={!selected || noRecord}
+          loading={printing}
+          disabled={printing || !selected || noRecord}
         >
-          <PrinterOutlined /> {multiCopy ? '打印(5联)' : '打印'}
+          {!printing && <PrinterOutlined />} {printing ? '正在加载打印…' : (multiCopy ? '打印(5联)' : '打印')}
         </Button>
         <Button
           style={{ flex: 1, height: 38, borderRadius: 8, border: '1px solid #e5e6eb', fontSize: 14, fontWeight: 500 }}

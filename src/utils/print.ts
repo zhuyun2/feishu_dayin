@@ -60,7 +60,7 @@ export async function printDocxBlob(
       className: 'docx',
       inWrapper: true,
       hideWrapperOnPrint: true, // 打印时隐藏灰色外框
-      breakPages: true,
+      breakPages: true, // 让 docx-preview 把模板内的 <w:br w:type="page"/> 渲染成多 section.docx
       ignoreWidth: false,
       ignoreHeight: false,
       ignoreFonts: false, // 保留文档字体声明
@@ -69,13 +69,16 @@ export async function printDocxBlob(
     });
 
     await injectHeaderFallback(blob, mount);
-    // 电子印章叠加（先于 waitForImages，确保印章随文档一起等图加载）
+    injectPrintStyles(doc, orientation);
+    // 多 section 文档：先隐藏只含页眉页脚的空页，再叠加印章——保证页索引对应可见页，
+    // 且不会把章盖到将被隐藏的空页上
+    hideEmptySections(doc);
+    // 多页文档：为每个非末尾 section 强制分页 + 防止段尾浮动溢出
+    enforceMultiPageBreaks(doc);
+    // 电子印章叠加（按页；先于 waitForImages，确保印章随文档一起等图加载）
     if (overlay && overlay.stamps.length > 0) {
       overlayStampsOnDoc(mount, overlay.stamps, overlay.config);
     }
-    injectPrintStyles(doc, orientation);
-    // 多 section 文档：隐藏只含页眉页脚的空页
-    hideEmptySections(doc);
     await waitForImages(doc, 4000);
     // 压缩 Word 里被空段落撑大的「以下空白」占位行，避免它把页脚挤出 A4
     compactPlaceholderBlankRows(doc);
@@ -119,6 +122,9 @@ export async function printCopies(opts: {
     doc.write('<!doctype html><html><head><meta charset="utf-8"><title>打印</title></head><body></body></html>');
     doc.close();
 
+    // 各联的 docx 渲染容器（供统一叠加印章）
+    const mounts: HTMLElement[] = [];
+
     for (let i = 0; i < labels.length; i++) {
       const page = doc.createElement('div');
       page.className = 'print-copy';
@@ -133,16 +139,14 @@ export async function printCopies(opts: {
 
       if (docxBlob) {
         const mount = doc.createElement('div');
+        mounts.push(mount);
         page.appendChild(mount);
         await renderAsync(docxBlob, mount, undefined, {
           className: 'docx', inWrapper: true, hideWrapperOnPrint: true, breakPages: true,
           ignoreWidth: false, ignoreHeight: false, ignoreFonts: false, useBase64URL: true, experimental: true,
         });
         await injectHeaderFallback(docxBlob, mount);
-        // 每联都盖同样的印章
-        if (overlay && overlay.stamps.length > 0) {
-          overlayStampsOnDoc(mount, overlay.stamps, overlay.config);
-        }
+        // 每联的印章叠加统一放到 hideEmptySections 之后（保证页索引对应可见页）
       } else if (htmlTable) {
         page.insertAdjacentHTML('beforeend', htmlTable);
       }
@@ -150,8 +154,17 @@ export async function printCopies(opts: {
     }
 
     injectPrintStyles(doc, orientation);
-    // 多 section 文档：隐藏只含页眉页脚的空页
+    // 多 section 文档：隐藏只含页眉页脚的空页（单页文档完全不处理）
     hideEmptySections(doc);
+    // 多页文档：为每个非末尾 section 强制分页 + 防止段尾浮动溢出
+    enforceMultiPageBreaks(doc);
+    // 电子印章叠加（按页；先于 waitForImages，确保印章随文档一起等图加载）
+    if (overlay && overlay.stamps.length > 0) {
+      mounts.forEach((mount) => {
+        if (!mount.querySelector('section.docx')) return;
+        overlayStampsOnDoc(mount, overlay.stamps, overlay.config);
+      });
+    }
     await waitForImages(doc, 4000);
     // 压缩 Word 里被空段落撑大的「以下空白」占位行，避免它把页脚挤出 A4
     compactPlaceholderBlankRows(doc);
@@ -223,6 +236,8 @@ export async function printHtmlTable(tableHtml: string, orientation: PrintOrient
 function injectPrintStyles(doc: Document, orientation: PrintOrientation = 'auto') {
   // 读取首个渲染出的页面 section，取其真实宽高作为 @page size
   const section = doc.querySelector('section.docx') as HTMLElement | null;
+  const sections = Array.from(doc.querySelectorAll('section.docx')) as HTMLElement[];
+  const isMultiPage = sections.length >= 2;
   const pageRule = buildPageRule(section, orientation);
   let rotateCss = '';
 
@@ -260,18 +275,25 @@ function injectPrintStyles(doc: Document, orientation: PrintOrientation = 'auto'
 
   const style = doc.createElement('style');
   // 页脚绝对定位规则：仅非横向模式启用（landscape 旋转后 bottom 定位会错位到纸边缘）
+  // 关键区分：
+  //   - 单页文档：section 高度改为 auto，避免内容不足一页时被浏览器按固定高度分页产生空白页。
+  //   - 多页文档（>=2 个 section.docx）：保留 docx-preview 渲染出的固定 A4 高度，
+  //     配合 enforceMultiPageBreaks 的 break-after:page，让每页独占一张物理纸。
+  const sectionHeightCss = isMultiPage
+    ? ''
+    : `min-height: auto !important;
+        height: auto !important;`;
   const footerAbsCss = orientation === 'landscape' ? '' : `
       section.docx {
         box-shadow: none !important;
         margin: 0 !important;
-        min-height: auto !important;
-        height: auto !important;
         box-sizing: border-box !important;
         position: relative !important;
         padding-bottom: 10px !important;
         overflow: visible !important;
         break-after: auto !important;
         page-break-after: auto !important;
+        ${sectionHeightCss}
       }
       section.docx > FOOTER,
       section.docx > footer,
@@ -482,6 +504,39 @@ export function hideEmptySections(doc: Document): number {
   return hidden;
 }
 
+// 多页文档（≥2 个 section.docx）分页强制。
+//
+// 背景：模板里若插入 `<w:br w:type="page"/>`（例如在「附谱图」「附图」等附页之前手动分页），
+// docx-preview 在 `breakPages:true` 下会把它渲染为独立的 `<section.docx>`。但浏览器打印默认
+// 会将同一 DOM 流的多个 section 排在一张物理页里 —— `injectPrintStyles` 全局
+// `section.docx { break-after:auto; page-break-after:auto }`（为单页文档防空白页而设）
+// 也会阻止自动分页。本函数为每个非末尾 section 注入显式 `page-break-after:always`，
+// 让 docx-preview 的多 section 渲染在打印时按设计落到独立物理页，附页从新一页开始。
+//
+// 同时给每个 section 维持「页脚高度」预留（reserveFooterSpace 已经处理），这里只补强分页。
+//
+// 单 section 文档直接返回，不动现有防空白页规则。
+function enforceMultiPageBreaks(doc: Document) {
+  const sections = Array.from(doc.querySelectorAll('section.docx')) as HTMLElement[];
+  if (sections.length <= 1) return;
+  for (let i = 0; i < sections.length - 1; i++) {
+    const sec = sections[i];
+    // 已在 CSS 中以 layout-stable 形式定义；此处用内联样式做最终强制，覆盖 .docx-wrapper 样式表
+    sec.style.setProperty('break-after', 'page', 'important');
+    sec.style.setProperty('page-break-after', 'always', 'important');
+    // 让分页前不因浮动/绝对定位元素脱页（防止附页页眉与上页页脚粘连）
+    sec.style.setProperty('overflow', 'visible', 'important');
+  }
+  // 最后一节也要清掉「break-after:auto 等于不分页」：本身就不需要强制分页，
+  // 但保险起见显式声明，让打印引擎不附加意外断页
+  const last = sections[sections.length - 1];
+  last.style.setProperty('break-after', 'auto', 'important');
+  last.style.setProperty('page-break-after', 'auto', 'important');
+}
+
+// 直接打印已渲染好的预览容器：保留 docx-preview 已渲染的 DOM（含电子印章与多 section 分页），
+// 仅注入最小打印样式（纸张尺寸、颜色保真、去灰底、分页强制），不再二次 renderAsync。
+// 这是「单份 docx 打印与预览布局保持一致」的入口；多联 / xlsx 仍走 printDocxBlob/printHtmlTable。
 export async function printPreviewElement(
   sourceEl: HTMLElement,
   orientation: PrintOrientation = 'auto'
@@ -543,6 +598,10 @@ export async function printPreviewElement(
     `;
     doc.head.appendChild(style);
 
+    // 多页文档：把预览中的多 section 强制按物理页分页（与 printDocxBlob 路径保持一致）
+    hideEmptySections(doc);
+    enforceMultiPageBreaks(doc);
+
     await waitForImages(doc, 4000);
     await new Promise((r) => setTimeout(r, 200));
     win.focus();
@@ -577,48 +636,60 @@ export async function printDocxAsPdf(blob: Blob): Promise<void> {
 
   const url = URL.createObjectURL(pdfBlob);
   const iframe = document.createElement('iframe');
-  iframe.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:1000px;height:1400px;opacity:0;border:0;pointer-events:none;';
-  document.body.appendChild(iframe);
+  iframe.setAttribute('aria-hidden', 'true');
+  iframe.style.position = 'fixed';
+  iframe.style.right = '0';
+  iframe.style.bottom = '0';
+  iframe.style.width = '1px';
+  iframe.style.height = '1px';
+  iframe.style.border = '0';
+  iframe.style.opacity = '0';
+  iframe.style.pointerEvents = 'none';
 
+  let cleaned = false;
+  let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
   const cleanup = () => {
-    setTimeout(() => {
-      if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
-      URL.revokeObjectURL(url);
-    }, 3000);
+    if (cleaned) return;
+    cleaned = true;
+    if (cleanupTimer) clearTimeout(cleanupTimer);
+    try { iframe.remove(); } catch { /* iframe 可能已被宿主清理 */ }
+    URL.revokeObjectURL(url);
   };
 
   try {
-    const doc = iframe.contentDocument;
-    const win = iframe.contentWindow;
-    if (!doc || !win) throw new Error('无法创建打印容器');
-
-    doc.open();
-    doc.write(`<!doctype html><html><head><meta charset="utf-8"><title>打印</title></head>
-      <body style="margin:0;padding:0;background:#fff">
-        <embed id="pdfDoc" src="${url}" type="application/pdf" style="width:100%;height:100%;border:0">
-      </body></html>`);
-    doc.close();
-
-    // 等待 PDF 加载完成（embed 的 load 事件），超时兜底
-    await new Promise<void>((resolve) => {
-      const emb = doc.getElementById('pdfDoc') as HTMLElement | null;
+    // PDF 在当前插件页面的隐藏 iframe 中加载，只唤起系统打印弹窗，
+    // 不再创建用户可见的浏览器页面。
+    await new Promise<void>((resolve, reject) => {
       let settled = false;
-      const finish = () => {
+      const timeout = setTimeout(() => {
         if (settled) return;
         settled = true;
+        reject(new Error('PDF 加载超时'));
+      }, 10000);
+      iframe.addEventListener('load', () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
         resolve();
-      };
-      if (emb) {
-        emb.addEventListener('load', finish);
-        emb.addEventListener('error', finish);
-      }
-      setTimeout(finish, 3000);
+      }, { once: true });
+      iframe.addEventListener('error', () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        reject(new Error('PDF 加载失败'));
+      }, { once: true });
+      iframe.src = url;
+      document.body.appendChild(iframe);
     });
     await new Promise((r) => setTimeout(r, 300));
+    const printFrame = iframe.contentWindow;
+    if (!printFrame) throw new Error('无法访问 PDF 打印窗口');
+    printFrame.addEventListener('afterprint', cleanup, { once: true });
+    printFrame.focus();
+    printFrame.print();
 
-    win.focus();
-    win.print();
-    cleanup();
+    // 某些 WebView 不触发 afterprint，保留兜底清理，避免 iframe 和 Blob 长期占用内存。
+    cleanupTimer = setTimeout(cleanup, 10 * 60 * 1000);
   } catch (e: any) {
     cleanup();
     throw new Error('PDF 打印被环境拦截（' + (e?.message || e) + '）');

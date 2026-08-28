@@ -102,6 +102,63 @@ function ensureContentType(contentTypes: string, ext: string): string {
   return contentTypes.replace('</Types>', decl + '</Types>');
 }
 
+// ===== 页段解析（下载注入按页定位） =====
+// 把 <w:body> 内的文档流按「页边界」切成若干页段，供按页插入印章段落：
+//   - 页边界标记：分页符（<w:br w:type="page"/>）、pageBreakBefore、段落级 sectPr
+//     （<w:pPr><w:sectPr> 或段落内容级 <w:sectPr>，均表示该段落是某节最后一段）
+//   - 边界段落本身归属前一页；第 k 页段 = 第 k-1 个边界段落结束 → 第 k 个边界段落结束
+//   - 无任何边界标记的文档只有一个页段（即整个 body），与旧行为（body 末尾注入）一致
+interface PageSegment {
+  start: number; // 页段起始偏移（body 内）
+  end: number;   // 页段结束偏移（不含）
+}
+
+function parsePageSegments(docXml: string, bodyStart: number, bodyEnd: number): PageSegment[] {
+  // 页边界段落（分页符/段落级 sectPr/pageBreakBefore）本身归属前一页，
+  // 因此记录「段落开始」与「段落结束」两个位置：
+  //   - 首页段 = body 开始 → 首个边界段落开始（不含边界段落）
+  //   - 中间页段 = 上一边界段落结束 → 本边界段落开始
+  //   - 尾页段 = 最后边界段落结束 → body 结束
+  const bounds: { start: number; end: number }[] = [];
+  const pRe = /<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>|<w:p(?:\s[^>]*)?\/>/g;
+  let m: RegExpExecArray | null;
+  while ((m = pRe.exec(docXml))) {
+    if (m.index < bodyStart || m.index >= bodyEnd) continue;
+    const seg = m[0];
+    const isBoundary =
+      /<w:br[^>]*w:type="page"/.test(seg) ||
+      // 显式开启的 pageBreakBefore（无属性或 val=1/true/on；val=0/false/off 是关闭，不产生分页）
+      /<w:pageBreakBefore(?![^>]*w:val="(?:0|false|off)")[^>]*\/>/.test(seg) ||
+      /<w:sectPr[^>]*>/.test(seg); // 段落级 sectPr（pPr 内或段落内容级）
+    if (isBoundary) bounds.push({ start: m.index, end: m.index + seg.length });
+  }
+  const segments: PageSegment[] = [];
+  let cur = bodyStart;
+  bounds.forEach((b, i) => {
+    if (i === 0) {
+      segments.push({ start: cur, end: b.start });
+    } else {
+      segments.push({ start: bounds[i - 1].end, end: b.start });
+    }
+    cur = b.end;
+  });
+  segments.push({ start: cur, end: bodyEnd });
+  return segments;
+}
+
+// 页段内的安全插入点：取段内最后一个块级结束标签（段落或表格）之后。
+// anchor 浮动对象的实际位置由 posOffset 决定，流位置只决定「属于哪一页」，
+// 因此插在页段末尾既安全又符合"盖章在页面下部"的直觉。
+// 段内没有块级元素（理论空页）时退回页段开头。
+function insertionPoint(docXml: string, seg: PageSegment): number {
+  const region = docXml.slice(seg.start, seg.end);
+  const pEnd = region.lastIndexOf('</w:p>');
+  const tEnd = region.lastIndexOf('</w:tbl>');
+  if (pEnd < 0 && tEnd < 0) return seg.start;
+  const at = pEnd >= tEnd ? pEnd + '</w:p>'.length : tEnd + '</w:tbl>'.length;
+  return seg.start + at;
+}
+
 // ===== 生成 anchor 段落 XML（posOffset 绝对定位，相对页面左上角） =====
 
 function buildAnchorParagraph(opts: {
@@ -150,6 +207,9 @@ function buildAnchorParagraph(opts: {
 }
 
 // ===== 主入口：往渲染后的 zip 注入印章（下载用） =====
+// 多页模板（含分页符/段落级 sectPr）：按页注入，每页由 config.pages[k].enabled 控制
+// 是否盖章、锚点用 config.pages[k].anchor（锚定模式下预览动态计算并持久化）。
+// 单页/无分页符模板：等价于旧行为（body 末尾注入）。
 
 export function injectStampsIntoZip(
   zip: PizZip,
@@ -164,39 +224,59 @@ export function injectStampsIntoZip(
 
   let ct = contentTypes;
   let rels = relsXml;
-  const drawings: string[] = [];
 
   const base = STAMP_POSITION_BASE[config.position] || STAMP_POSITION_BASE['right-bottom'];
-  // 锚定模式：anchorText + 已保存的 anchor（预览时动态计算并持久化）优先于位置预设
-  const anchor = config.anchorText?.trim() ? config.anchor : undefined;
   const page = getPageSizeEmu(docXml);
   const stampWEmu = Math.round((page.w * config.size) / 100);
 
+  // 印章图片与关系：每枚只注册一次（media + rels + Content_Types），各页复用同一 rId
   stamps.forEach((stamp, i) => {
     const bytes = base64ToBytes(stamp.base64);
     const info = detectImage(bytes);
     if (!info) throw new Error(`印章图片「${stamp.name}」格式无法识别`);
-    const id = 100 + i; // docPr id 避开模板既有值
     const rId = `rIdStamp${i}`;
-    const stampHEmu = Math.round((stampWEmu * info.h) / info.w);
-
     ct = ensureContentType(ct, info.ext);
     rels = rels.replace(
       '</Relationships>',
       `<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/stamp${i}.${info.ext}"/></Relationships>`
     );
     zip.file(`word/media/stamp${i}.${info.ext}`, stamp.base64, { base64: true });
+  });
 
-    // 印章中心点（% 页宽/高），与预览叠加（stampOverlay）一致：
-    // 锚定模式下以锚点为基准（offsetX/Y 作为微调），多枚向下错开 i*9%
-    const centerX = page.w * (((anchor ? anchor.x : base.x) + config.offsetX) / 100);
-    const centerY = page.h * (((anchor ? anchor.y : base.y) + config.offsetY + i * 9) / 100);
-    // anchor 定位点是图片左上角
-    const left = Math.max(0, centerX - stampWEmu / 2);
-    const top = Math.max(0, centerY - stampHEmu / 2);
+  // 解析 body 与页段
+  const bodyStart = docXml.indexOf('<w:body>');
+  const bodyEnd = docXml.lastIndexOf('<w:sectPr'); // body 级 sectPr（页面属性）之前
+  if (bodyStart < 0) return zip;
+  const segEnd = bodyEnd >= bodyStart ? bodyEnd : docXml.indexOf('</w:body>');
+  const segments = parsePageSegments(docXml, bodyStart + '<w:body>'.length, segEnd);
 
-    drawings.push(
-      buildAnchorParagraph({
+  // 逐页生成印章段落，记录插入位置（同页多枚拼接为一个插入块，保证顺序）
+  const insertions: { pos: number; xml: string }[] = [];
+  segments.forEach((seg, k) => {
+    const pageCfg = config.pages?.[k];
+    const enabled = pageCfg?.enabled !== false;
+    if (!enabled) return;
+    // 锚定模式：该页锚点优先用 pages[k].anchor（预览按页定位并持久化），退回全局 anchor
+    const anchor = config.anchorText?.trim() ? pageCfg?.anchor || config.anchor : undefined;
+    const pos = insertionPoint(docXml, seg);
+
+    const drawings = stamps.map((stamp, i) => {
+      const bytes = base64ToBytes(stamp.base64);
+      const info = detectImage(bytes);
+      if (!info) throw new Error(`印章图片「${stamp.name}」格式无法识别`);
+      const id = 100 + k * 10 + i; // docPr id 按页+枚错开，避开模板既有值
+      const rId = `rIdStamp${i}`;
+      const stampHEmu = Math.round((stampWEmu * info.h) / info.w);
+
+      // 印章中心点（% 页宽/高），与预览叠加（stampOverlay）一致：
+      // 锚定模式下以锚点为基准（offsetX/Y 作为微调），多枚向下错开 i*9%
+      const centerX = page.w * (((anchor ? anchor.x : base.x) + config.offsetX) / 100);
+      const centerY = page.h * (((anchor ? anchor.y : base.y) + config.offsetY + i * 9) / 100);
+      // anchor 定位点是图片左上角
+      const left = Math.max(0, centerX - stampWEmu / 2);
+      const top = Math.max(0, centerY - stampHEmu / 2);
+
+      return buildAnchorParagraph({
         id,
         rId,
         ext: info.ext,
@@ -205,18 +285,23 @@ export function injectStampsIntoZip(
         left,
         top,
         opacity: config.opacity,
-      })
-    );
+      });
+    }).join('');
+
+    insertions.push({ pos, xml: drawings });
   });
+
+  // 从后往前插入，避免偏移错位；若无 </w:body> 则不注入
+  if (!docXml.includes('</w:body>')) return zip;
+  let out = docXml;
+  insertions.sort((a, b) => b.pos - a.pos);
+  for (const ins of insertions) {
+    out = out.slice(0, ins.pos) + ins.xml + out.slice(ins.pos);
+  }
 
   zip.file('[Content_Types].xml', ct);
   zip.file('word/_rels/document.xml.rels', rels);
-
-  // body 末尾（sectPr 之前）插入印章段落；若无 </w:body> 则不注入
-  const insert = drawings.join('');
-  if (docXml.includes('</w:body>')) {
-    zip.file('word/document.xml', docXml.replace('</w:body>', insert + '</w:body>'));
-  }
+  zip.file('word/document.xml', out);
 
   return zip;
 }

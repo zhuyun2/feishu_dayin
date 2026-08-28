@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback, forwardRef, useImperat
 import { renderAsync } from 'docx-preview';
 
 import { injectHeaderFallback } from '../services/docxHeaderFallback';
-import { overlayStampsOnDoc, type OverlayStamp, type OverlayResult } from '../services/stampOverlay';
+import { overlayStampsOnDoc, type OverlayStamp, type OverlayResult, type PageOverlayResult } from '../services/stampOverlay';
 import { hideEmptySections } from '../utils/print';
 import type { StampConfig, StampAnchor } from '../types';
 
@@ -20,11 +20,13 @@ interface Props {
   scale: number;
   onScaleChange: (s: number) => void;
   onError?: (msg: string) => void;
-  // 电子印章叠加：docx-preview 渲染后，向最后一页叠加印章（与下载注入坐标一致）
+  // 电子印章叠加：docx-preview 渲染后，向各页叠加印章（与下载注入坐标一致，按页控制）
   overlayStamps?: OverlayStamp[];
   overlayConfig?: StampConfig;
-  // 锚定文字定位结果回调（每次渲染叠加后上报，供打印页持久化 anchor）
-  onStampAnchor?: (anchor: StampAnchor | null, fromText: boolean) => void;
+  // 逐页锚定文字定位结果回调（每次渲染叠加后上报，供打印页按页持久化 anchor）
+  onStampAnchors?: (results: PageOverlayResult[]) => void;
+  // 渲染完成后可见页数回调（供打印页渲染「盖章页面」开关组）
+  onPageCount?: (n: number) => void;
 }
 
 export const MIN_SCALE = 0.5;
@@ -39,7 +41,7 @@ export function clampScale(v: number): number {
 // 缩放通过 CSS transform scale 实现，只影响预览显示，不影响下载/打印。
 // 缩放状态由父组件控制，工具条放在预览面板外，避免工具条自身被一起缩放。
 const DocxPreview = forwardRef<PreviewHandle, Props>(function DocxPreview(
-  { blob, orientation = 'auto', scale, onScaleChange, onError, overlayStamps, overlayConfig, onStampAnchor }, ref
+  { blob, orientation = 'auto', scale, onScaleChange, onError, overlayStamps, overlayConfig, onStampAnchors, onPageCount }, ref
 ) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -47,8 +49,10 @@ const DocxPreview = forwardRef<PreviewHandle, Props>(function DocxPreview(
   const orientationRef = useRef<Orientation>(orientation);
   useEffect(() => { orientationRef.current = orientation; }, [orientation]);
   // 回调走 ref，避免因回调身份变化触发整页重渲染
-  const anchorCbRef = useRef(onStampAnchor);
-  useEffect(() => { anchorCbRef.current = onStampAnchor; });
+  const anchorCbRef = useRef(onStampAnchors);
+  useEffect(() => { anchorCbRef.current = onStampAnchors; });
+  const pageCountCbRef = useRef(onPageCount);
+  useEffect(() => { pageCountCbRef.current = onPageCount; });
 
   // 适应宽度：按容器可用宽度 / 页面实际宽度 计算缩放比
   const fitWidth = useCallback(() => {
@@ -90,16 +94,22 @@ const DocxPreview = forwardRef<PreviewHandle, Props>(function DocxPreview(
         if (cancelled) return;
         await injectHeaderFallback(blob, el);
         if (cancelled) return;
-        // 电子印章叠加：渲染完成后盖章（锚定模式下动态查找锚定文字）
+        // 先隐藏只含页眉页脚的空页，再叠加印章：保证页索引对应「可见页」，
+        // 且不会把章盖到将被隐藏的空页上
+        if (el.ownerDocument) hideEmptySections(el.ownerDocument);
+        const visibleCount = Array.from(el.querySelectorAll('section.docx'))
+          .filter((s) => !s.classList.contains('empty-page-hidden')).length;
+        // 电子印章叠加：渲染完成后按页盖章（锚定模式下每页独立查找锚定文字）
         let overlayRes: OverlayResult | undefined;
         if (overlayStamps && overlayStamps.length > 0 && overlayConfig) {
           overlayRes = overlayStampsOnDoc(el, overlayStamps, overlayConfig);
         }
-        if (overlayRes && anchorCbRef.current) {
-          anchorCbRef.current(overlayRes.anchor ?? null, overlayRes.anchorFromText);
+        if (overlayRes?.pages && anchorCbRef.current) {
+          anchorCbRef.current(overlayRes.pages);
         }
-        // 多 section 文档：隐藏只含页眉页脚的空页
-        if (el.ownerDocument) hideEmptySections(el.ownerDocument);
+        if (pageCountCbRef.current) {
+          pageCountCbRef.current(visibleCount);
+        }
         setHasContent(true);
         requestAnimationFrame(() => fitWidth());
       } catch (e: any) {

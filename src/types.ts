@@ -74,6 +74,12 @@ export interface StampAnchor {
   y: number; // 0-100
 }
 
+// 单页盖章设置（键为页索引，0-based；多页模板按页控制盖章与锚点）
+export interface StampPageSetting {
+  enabled?: boolean;    // 该页是否盖章；undefined = 默认开
+  anchor?: StampAnchor; // 该页锚定文字定位结果（百分比），下载注入复用
+}
+
 // 盖章配置（打印页可调，按「表 + 模板」持久化 localStorage）
 export interface StampConfig {
   stamps: string[];  // 选中的印章文件名（可多选，多枚自动错开）
@@ -83,7 +89,8 @@ export interface StampConfig {
   offsetX: number;   // 水平微调（-40 ~ 40，百分比；锚定模式下为相对锚点的微调）
   offsetY: number;   // 垂直微调（-40 ~ 40，百分比；锚定模式下为相对锚点的微调）
   anchorText?: string; // 锚定文字（如"盖章"），非空时优先以该文字为中心盖章
-  anchor?: StampAnchor; // 最近一次锚定文字定位结果（百分比），下载注入复用
+  anchor?: StampAnchor; // 最近一次锚定文字定位结果（百分比），下载注入复用（单页/兼容兜底）
+  pages?: Record<number, StampPageSetting>; // 多页模板按页控制：是否盖章 + 每页锚点
 }
 
 export const DEFAULT_STAMP_CONFIG: StampConfig = {
