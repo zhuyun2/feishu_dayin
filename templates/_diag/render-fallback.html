@@ -1,0 +1,84 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>render + fallback</title>
+<style>
+  body { margin:0; font-family: monospace; }
+  #info { padding:8px; font-size:11px; background:#fef3c7; border:1px solid #f59e0b; }
+  .container { transform: scale(1); transform-origin: top center; width: 794px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<div id="info">loading...</div>
+<div class="container" id="container"></div>
+<script src="/templates/_diag/jszip.js"></script>
+<script src="/templates/_diag/docx-preview.js"></script>
+<script src="/templates/_diag/docxHeaderFallback.bundle.js"></script>
+<script>
+const params = new URLSearchParams(location.search);
+const file = params.get('file') || '10%卡松+货CJ-2-测试模版.docx';
+const subdir = params.get('subdir') || 'tbl4rkmTWj4CuLgp';
+
+const info = document.getElementById('info');
+const container = document.getElementById('container');
+
+(async () => {
+  const url = `/templates/${subdir}/${encodeURIComponent(file)}`;
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    info.textContent = `Failed to load ${url}: ${resp.status}`;
+    return;
+  }
+  const blob = await resp.blob();
+  info.textContent = `loaded: ${file} (${blob.size} bytes)`;
+
+  await docx.renderAsync(blob, container, undefined, {
+    className: 'docx', inWrapper: true, breakPages: true,
+    ignoreWidth: false, ignoreHeight: false, ignoreFonts: false,
+    useBase64URL: true, experimental: true,
+  });
+
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+  // run fallback
+  await DocxHeaderFallback.injectHeaderFallback(blob, container);
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+  const sections = container.querySelectorAll('section.docx');
+  const report = { sectionCount: sections.length, sections: [] };
+  for (let si = 0; si < sections.length; si++) {
+    const section = sections[si];
+    const header = section.querySelector('header');
+    const out = [];
+    function walk(el, depth = 0) {
+      const cs = window.getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      const hasBorder = parseFloat(cs.borderBottomWidth) > 0 || parseFloat(cs.borderTopWidth) > 0 || parseFloat(cs.borderLeftWidth) > 0 || parseFloat(cs.borderRightWidth) > 0;
+      const hasUnderline = cs.textDecorationLine && cs.textDecorationLine !== 'none';
+      if (hasBorder || hasUnderline) {
+        out.push({
+          tag: el.tagName,
+          className: el.className,
+          text: (el.textContent || '').slice(0, 80).replace(/\s+/g, ' '),
+          border: `${cs.borderTopWidth}/${cs.borderRightWidth}/${cs.borderBottomWidth}/${cs.borderLeftWidth}`,
+          borderColor: cs.borderBottomColor,
+          textDecoration: cs.textDecorationLine,
+          top: rect.top.toFixed(1),
+          left: rect.left.toFixed(1),
+          width: rect.width.toFixed(1),
+          height: rect.height.toFixed(1),
+          depth,
+        });
+      }
+      for (const child of el.children) walk(child, depth + 1);
+    }
+    walk(section);
+    report.sections.push({ index: si, headerChildren: header ? header.children.length : 0, borderElements: out });
+  }
+  window.__borderReport = report;
+  info.textContent += `\nsections: ${sections.length}`;
+})();
+</script>
+</body>
+</html>

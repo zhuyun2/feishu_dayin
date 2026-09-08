@@ -16,7 +16,7 @@
 <div class="container" id="container"></div>
 <script type="module">
 import { renderAsync } from 'https://cdn.jsdelivr.net/npm/docx-preview@0.1.15/+esm';
-import { injectHeaderFallback, __test_parseHeader } from '/scripts/_verify_browser/docxHeaderFallback.js';
+import { injectHeaderFallback, __test_parseHeader } from '/templates/_diag/docxHeaderFallback.js';
 
 const params = new URLSearchParams(location.search);
 const file = params.get('file') || '10%卡松+货CJ-2-测试模版.docx';

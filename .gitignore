@@ -12,3 +12,6 @@ dist/
 
 # pm2 杩涚▼閰嶇疆锛坉eploy.sh 鎸夋湰鍦扮鍙ｇ敓鎴愶紝涓嶆彁浜わ級
 ecosystem.config.cjs
+
+# 内网穿透临时地址（cloudflared 每次重启变化，不入库）
+tunnel-url.txt

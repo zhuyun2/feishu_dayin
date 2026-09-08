@@ -543,6 +543,19 @@ function hideNativeHeaderFloats(headerRoot: HTMLElement | null): void {
       }
     }
   }
+
+  // 同时清理页眉里空段落/div 上的装饰性下边框。
+  // docx-preview 对某些 Word 段落样式（如 docx_a7）会生成 border-bottom，
+  // 形成一条贯穿页眉的横线；该元素无实际文本，应移除其边框。
+  for (const el of Array.from(headerRoot.querySelectorAll('p, div'))) {
+    const htmlEl = el as HTMLElement;
+    if (!htmlEl.textContent?.trim()) {
+      const cs = getComputedStyle(htmlEl);
+      if (parseFloat(cs.borderBottomWidth) > 0 || parseFloat(cs.borderTopWidth) > 0) {
+        htmlEl.style.border = 'none';
+      }
+    }
+  }
 }
 
 function suppressDuplicateHeaderImages(
