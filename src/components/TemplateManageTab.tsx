@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Button, Input, Popconfirm, Modal, message, Select, Empty } from 'antd';
+import { Button, Input, Popconfirm, Modal, message, Select, Empty, Switch, Tag } from 'antd';
 import { UploadOutlined, DeleteOutlined, CopyOutlined, DownloadOutlined } from '@ant-design/icons';
 import type { UploadProps } from 'antd';
 import type { TemplateInfo, MatchConfig } from '../types';
@@ -37,6 +37,12 @@ export default function TemplateManageTab({
   const [copyTarget, setCopyTarget] = useState('');
   const [savingConfig, setSavingConfig] = useState(false);
   const [showMatchEdit, setShowMatchEdit] = useState(false);
+  const [showCheckEdit, setShowCheckEdit] = useState(false);
+  const [checkDraft, setCheckDraft] = useState<{
+    enabled: boolean;
+    fieldId?: string;
+    allowedValues: string[];
+  } | null>(null);
 
   const filtered = useMemo(() => {
     const k = keyword.trim().toLowerCase();
@@ -50,6 +56,11 @@ export default function TemplateManageTab({
 
   const currentMatchFieldName = active.fieldMetas.find(
     (f) => f.id === currentMatchFieldId
+  )?.name;
+
+  const currentCheck = active.tableId ? matchConfig.tables[active.tableId] : undefined;
+  const currentCheckFieldName = active.fieldMetas.find(
+    (f) => f.id === currentCheck?.checkFieldId
   )?.name;
 
   const tableId = active.tableId;
@@ -153,6 +164,7 @@ export default function TemplateManageTab({
       } else {
         const meta = active.fieldMetas.find((f) => f.id === fieldId);
         next.tables[active.tableId] = {
+          ...(next.tables[active.tableId] || { matchFieldId: '', matchFieldName: '' }),
           matchFieldId: fieldId,
           matchFieldName: meta?.name || '',
         };
@@ -161,6 +173,45 @@ export default function TemplateManageTab({
       onConfigChanged(saved);
       message.success('已保存自动匹配字段');
       setShowMatchEdit(false);
+    } catch (e: any) {
+      message.error(e?.message || '保存失败');
+    } finally {
+      setSavingConfig(false);
+    }
+  };
+
+  // 打开校验编辑：用当前已存配置初始化草稿
+  const openCheckEdit = () => {
+    setCheckDraft({
+      enabled: currentCheck?.checkEnabled ?? false,
+      fieldId: currentCheck?.checkFieldId,
+      allowedValues: currentCheck?.checkAllowedValues ?? [],
+    });
+    setShowCheckEdit(true);
+  };
+
+  const handleSaveCheck = async () => {
+    if (!active.tableId || !checkDraft) return;
+    setSavingConfig(true);
+    try {
+      const next: MatchConfig = { tables: { ...matchConfig.tables } };
+      const base = next.tables[active.tableId] || { matchFieldId: '', matchFieldName: '' };
+      const meta = checkDraft.fieldId
+        ? active.fieldMetas.find((f) => f.id === checkDraft.fieldId)
+        : undefined;
+      next.tables[active.tableId] = {
+        ...base,
+        checkEnabled: checkDraft.enabled,
+        checkFieldId: checkDraft.enabled ? checkDraft.fieldId : undefined,
+        checkFieldName: checkDraft.enabled ? meta?.name || '' : undefined,
+        checkAllowedValues: checkDraft.enabled
+          ? checkDraft.allowedValues.map((v) => v.trim()).filter(Boolean)
+          : undefined,
+      };
+      const saved = await putConfig(next);
+      onConfigChanged(saved);
+      message.success('已保存打印校验设置');
+      setShowCheckEdit(false);
     } catch (e: any) {
       message.error(e?.message || '保存失败');
     } finally {
@@ -235,6 +286,103 @@ export default function TemplateManageTab({
             showSearch
             optionFilterProp="label"
           />
+        </div>
+      )}
+
+      {/* 打印前字段校验 */}
+      <div
+        style={{
+          fontSize: 12,
+          color: '#646a73',
+          background: '#fff7e6',
+          borderRadius: 8,
+          padding: '10px 12px',
+          display: 'flex',
+          gap: 8,
+          alignItems: 'flex-start',
+          lineHeight: 1.5,
+          flexShrink: 0,
+        }}
+      >
+        <span style={{ flexShrink: 0 }}>🛡️</span>
+        <span style={{ flex: 1 }}>
+          打印校验：{currentCheck?.checkEnabled && currentCheck?.checkFieldId ? (
+            <>
+              启用，字段 <b>{currentCheckFieldName || '未命名'}</b>
+              {' '}值需为 <b>{currentCheck.checkAllowedValues?.join(' / ') || '未设置'}</b>
+            </>
+          ) : (
+            '未启用'
+          )}
+          {' '}— 开启后，仅当指定字段值命中允许值时才能打印。
+          <a onClick={() => (showCheckEdit ? setShowCheckEdit(false) : openCheckEdit())} style={{ color: '#3370FF', marginLeft: 4, cursor: 'pointer' }}>
+            {showCheckEdit ? '收起' : '设置'}
+          </a>
+        </span>
+      </div>
+
+      {showCheckEdit && checkDraft && (
+        <div
+          style={{
+            background: '#fff',
+            borderRadius: 10,
+            padding: 12,
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10,
+            flexShrink: 0,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 13, fontWeight: 500 }}>启用打印校验</span>
+            <Switch
+              checked={checkDraft.enabled}
+              onChange={(v) => setCheckDraft((d) => (d ? { ...d, enabled: v } : d))}
+            />
+            {checkDraft.enabled && <Tag color="orange" style={{ margin: 0 }}>已开启</Tag>}
+          </div>
+
+          {checkDraft.enabled && (
+            <>
+              <div>
+                <div style={{ fontSize: 12, color: '#646a73', marginBottom: 6 }}>
+                  校验字段（从多维表字段中选择）
+                </div>
+                <Select
+                  style={{ width: '100%' }}
+                  placeholder="选择校验字段（如 审核）"
+                  value={checkDraft.fieldId}
+                  onChange={(v) => setCheckDraft((d) => (d ? { ...d, fieldId: v } : d))}
+                  options={active.fieldMetas.map((f) => ({ label: f.name, value: f.id }))}
+                  showSearch
+                  optionFilterProp="label"
+                />
+              </div>
+
+              <div>
+                <div style={{ fontSize: 12, color: '#646a73', marginBottom: 6 }}>
+                  允许打印的值（命中任一即允许，可回车添加多个）
+                </div>
+                <Select
+                  mode="tags"
+                  style={{ width: '100%' }}
+                  placeholder="输入允许值，回车添加（如 通过）"
+                  value={checkDraft.allowedValues}
+                  onChange={(v) => setCheckDraft((d) => (d ? { ...d, allowedValues: v as string[] } : d))}
+                  tokenSeparators={[',', '，']}
+                  open={false}
+                  suffixIcon={null}
+                />
+              </div>
+            </>
+          )}
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+            <Button size="small" onClick={() => setShowCheckEdit(false)}>取消</Button>
+            <Button size="small" type="primary" loading={savingConfig} onClick={handleSaveCheck}>
+              保存校验设置
+            </Button>
+          </div>
         </div>
       )}
 

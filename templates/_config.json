@@ -1,3 +1,14 @@
 {
-  "tables": {}
+  "tables": {
+    "tbldeXFrTixlf6sB": {
+      "matchFieldId": "",
+      "matchFieldName": "",
+      "checkEnabled": true,
+      "checkFieldId": "fldhDt1X9Q",
+      "checkFieldName": "审批结果",
+      "checkAllowedValues": [
+        "通过"
+      ]
+    }
+  }
 }

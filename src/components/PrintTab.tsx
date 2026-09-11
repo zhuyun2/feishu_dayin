@@ -17,6 +17,7 @@ import { fillXlsx, isXlsxName } from '../services/xlsxFill';
 import { stampDocxBlob, arrayBufferToBase64 } from '../services/docxStamp';
 import type { OverlayStamp, PageOverlayResult } from '../services/stampOverlay';
 import { resolveAutoSelection } from '../services/templateMatch';
+import { checkPrintAllowed } from '../services/printCheck';
 import { createRequestGate } from '../services/requestGate';
 import { currentPreviewBlob } from '../services/previewBlob';
 import {
@@ -70,6 +71,13 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
   const DEFAULT_COPIES = ['生产部', '销售部', '客户', '财务部', '开票'];
   const [rendering, setRendering] = useState(false);
   const [printing, setPrinting] = useState(false);
+  // 打印校验实时状态：记录变化/配置变化时读取校验字段值
+  const [printCheck, setPrintCheck] = useState<{
+    loading: boolean;
+    passed: boolean;
+    value: string;
+    reason?: string;
+  }>({ loading: false, passed: true, value: '' });
   const [errors, setErrors] = useState<string[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [scale, setScale] = useState(1);
@@ -315,6 +323,39 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
 
   const isXlsx = !!selected && isXlsxName(selected);
 
+  // 打印校验配置
+  const checkCfg = active.tableId ? matchConfig.tables[active.tableId] : undefined;
+  const checkActive = !!checkCfg?.checkEnabled && !!checkCfg?.checkFieldId;
+
+  // 实时读取当前记录校验字段值，未命中允许值则打印按钮置灰
+  useEffect(() => {
+    if (!checkActive || !active.table || !active.recordId) {
+      setPrintCheck({ loading: false, passed: true, value: '' });
+      return;
+    }
+    let cancelled = false;
+    setPrintCheck((s) => ({ ...s, loading: true }));
+    (async () => {
+      const res = await checkPrintAllowed({
+        enabled: true,
+        fieldId: checkCfg!.checkFieldId,
+        allowedValues: checkCfg!.checkAllowedValues,
+        table: active.table,
+        fieldMetas: active.fieldMetas,
+        recordId: active.recordId!,
+      });
+      if (cancelled) return;
+      setPrintCheck({
+        loading: false,
+        passed: res.ok,
+        value: res.fieldValue,
+        reason: res.message,
+      });
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active.tableId, active.recordId, matchConfig, active.table, active.fieldMetas]);
+
   // 按当前配置构建打印叠加层（印章 base64 走缓存，读取失败则本次不盖章）
   const buildOverlay = async (): Promise<PrintOverlay | undefined> => {
     const cfg = stampConfigRef.current;
@@ -332,6 +373,13 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
 
   const handlePrint = async () => {
     if (printing) return;
+
+    // 打印校验未通过：按钮已置灰，此处兜底拦截
+    if (checkActive && active.recordId && !printCheck.passed && !printCheck.loading) {
+      message.warning(printCheck.reason || '当前记录未通过打印校验');
+      return;
+    }
+
     setPrinting(true);
     try {
       const blob = safePreviewBlob || (await generate());
@@ -705,9 +753,14 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
           style={{ flex: 1, height: 38, borderRadius: 8, fontSize: 14, fontWeight: 500 }}
           onClick={handlePrint}
           loading={printing}
-          disabled={printing || !selected || noRecord}
+          disabled={printing || !selected || noRecord || (checkActive && !printCheck.passed)}
         >
-          {!printing && <PrinterOutlined />} {printing ? '正在加载打印…' : (multiCopy ? '打印(5联)' : '打印')}
+          {!printing && <PrinterOutlined />}{' '}
+          {printing
+            ? '正在加载打印…'
+            : multiCopy
+            ? '打印(5联)'
+            : '打印'}
         </Button>
         <Button
           style={{ flex: 1, height: 38, borderRadius: 8, border: '1px solid #e5e6eb', fontSize: 14, fontWeight: 500 }}

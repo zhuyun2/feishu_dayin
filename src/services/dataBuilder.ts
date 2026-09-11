@@ -2,7 +2,7 @@ import { bitable, FieldType } from '@lark-base-open/js-sdk';
 import type { FieldMetaLite, PrintDataResult, PrintDataValue, LinkedRow } from '../types';
 import { amountToChinese } from './money';
 
-const MAX_LINKED_RECORDS = 50; // 单个关联字段最多展开条数
+const MAX_LINKED_RECORDS = 200; // 单个关联字段最多展开条数
 const CONCURRENCY = 10; // 关联记录读取并发上限
 
 const LINK_TYPES = [FieldType.SingleLink, FieldType.DuplexLink]; // 18 / 21

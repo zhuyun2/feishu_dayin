@@ -11,6 +11,11 @@ export interface TemplateInfo {
 export interface TableMatchConfig {
   matchFieldId: string;
   matchFieldName: string;
+  // 打印前字段校验
+  checkEnabled?: boolean;        // 是否启用打印校验
+  checkFieldId?: string;         // 校验字段 ID
+  checkFieldName?: string;       // 校验字段名
+  checkAllowedValues?: string[]; // 允许打印的字段值（如 通过/已审核）
 }
 
 // 全局匹配配置（/api/config）
