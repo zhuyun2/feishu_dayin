@@ -107,7 +107,7 @@ $env:PORT=5199; npm run start
 - 取值与表格显示一致（日期、单选、多选等按界面格式输出）；复选框输出“是/否”。
 - 附件字段只输出文件名，**不插入图片**。
 - 字段名与系统变量重名时，以真实字段为准。
-- 单个关联字段最多展开 50 条记录（超出会提示并截断）。
+- 单个关联字段最多展开 200 条记录（超出会提示并截断）。
 - 预览用于校对数据，复杂版式（文本框、浮动图片、页眉页脚）的完全保真以“下载 Word”后用 Word 打开为准。
 
 ## 构建
@@ -126,7 +126,12 @@ npm run build
 │   ├── _legacy/            # 早期未分表的模板归档（不参与列表，可手动迁回）
 │   └── <tableId>/*.docx    # 每张数据表的模板，按表隔离
 ├── server/
-│   └── templateApi.js      # 模板/配置 API（挂载到 dev server）
+│   ├── templateApi.js      # 模板/配置 API（挂载到 dev server）
+│   ├── tunnelCore.js       # 内网穿透核心逻辑（复用优先；CLI 与 API 共用这一份）
+│   └── tunnelApi.js        # 内网穿透 HTTP 接口 + 本地 /deploy 页面
+├── tunnel.js               # 内网穿透命令行（一键部署的本体）
+├── 一键部署.bat             # 双击即部署（断网后恢复地址用这个）
+├── tunnel.bat / tunnel.ps1 # 同上，等价入口
 ├── src/
 │   ├── index.tsx           # 入口
 │   ├── App.tsx             # 三页签编排
@@ -141,42 +146,126 @@ npm run build
 
 ## 长期部署（常驻服务 + 内网穿透）
 
-生产使用方式 = 常驻运行 dev server（含 `/api` 与 `/templates`）+ 内网穿透暴露 HTTPS，供飞书插件访问。仓库提供了两套一键脚本：
+生产使用方式 = 常驻运行 dev server（含 `/api` 与 `/templates`）+ 内网穿透暴露 HTTPS，供飞书插件访问。
+
+### 一键部署（推荐：双击项目里的执行文件）
+
+「一键部署」是一枚**项目内的可执行文件**，而不是插件里的按钮 ——
+因为隧道一断，飞书里根本打不开插件，插件里的按钮也就点不到。
+
+| 入口 | 位置 | 说明 |
+|------|------|------|
+| **`一键部署.bat`**（推荐） | 仓库根目录，双击运行 | 地址过期 / 断网恢复后跑一次即可，窗口保留结果 |
+| `tunnel.bat` | 仓库根目录，双击运行 | 与上面等价 |
+| 命令行 | `node tunnel.js deploy` | 等价功能，另可 `status` / `url` / `new` / `stop` |
+| PowerShell | `.\tunnel.ps1 deploy` | 只是转发到 `node tunnel.js`，兼容旧用法 |
+| 本地部署页 | `http://localhost:5173/deploy` | 需要在网页上点的时候用（等价功能） |
+
+跑完之后会直接打印**可用的内网穿透地址**，照着填进飞书插件配置即可：
+
+```
+ [隧道动作] 复用上一次的地址（未重启隧道）
+ [公网检查] 地址可达
+------------------------------------------------------------
+ 内网穿透地址：
+
+   https://xxxx.trycloudflare.com
+
+------------------------------------------------------------
+ 结论：地址未变，飞书插件配置无需修改。
+```
+
+`一键部署.bat` 的执行顺序（**不需要你先把服务起起来**）：
+
+1. 确认本地服务在跑，没跑就自动拉起；
+2. 探测上一次的地址是否还能回连到本机（多试几次，避免瞬时抖动误判）；
+3. 能用 → **直接复用，绝不重启隧道，地址不变**；不能用 → 才重新生成；
+4. 打印地址并写入 `tunnel-url.txt`（地址有变化时还会复制到剪贴板，方便粘贴）。
+
+```bash
+node tunnel.js            # 一键部署（复用优先）
+node tunnel.js new        # 强制换新地址（地址必变，需更新飞书插件配置）
+node tunnel.js status     # 查看隧道 / 地址 / 进程状态
+node tunnel.js url        # 只输出当前地址（便于脚本取值）
+node tunnel.js stop       # 停止隧道
+node tunnel.js --help     # 全部选项（--port / --json / --quiet / --timeout）
+```
+
+### 内网穿透地址为什么能保持不换
+
+cloudflared 的临时隧道（`*.trycloudflare.com`）域名由 Cloudflare **随机分配**，客户端无法指定；
+但它在 **cloudflared 进程存活期间保持不变**（短暂断网自动重连也不会变），
+Cloudflare 只会在隧道断连超过约 5 分钟后回收域名。
+
+所以「一键部署」的做法是 **复用优先**：
+
+1. 先探测上一次的地址是否仍可用（进程活着 **并且** 该地址能回连到本机这套服务——用 `instanceId` 校验，避免误用别的域名）；
+2. 可用 → **直接复用，绝不重启隧道，地址保持不变**（飞书插件配置不用改）；
+3. 单次探测失败不急着换地址：会再重试几次（本地服务刚重启、边缘抖动都会让一次探测失败，白换地址的代价太大）；
+4. 只有确认失效 → 才重新生成新地址，并明确提示「地址已变更，请更新飞书插件配置」。
+
+> 旧版脚本的问题就在第 2 步：`start`/`restart` 会先 `delete` 再 `start` cloudflared，
+> 等于每次都重启隧道进程，所以地址每次都变。现在已改为复用优先。
+
+需要「重启电脑、断网很久之后地址也永远不变」时，必须用 **命名隧道 + 自有域名**（见下方 `tunnel` 子命令）。
+
+长期挂机还可以用仓库自带的两套脚本（隧道逻辑与 `tunnel.js` **同源**，都在 `server/tunnelCore.js`）：
 
 | 系统 | 脚本 | 说明 |
 |------|------|------|
-| macOS / Linux | `deploy.sh` | pm2 守护 dev server + cloudflared 穿透；`start_at_login.sh` 供 LaunchAgent 登录自启 |
+| macOS / Linux | `deploy.sh` | pm2 守护 dev server；隧道由 `/api/tunnel/*` 管理；`start_at_login.sh` 供 LaunchAgent 登录自启 |
 | Windows | `deploy.ps1` | 同上，PowerShell 实现；用计划任务实现登录自启 |
 
-常用命令（两脚本参数一致）：
+常用命令：
 
 ```bash
 # macOS / Linux
 ./deploy.sh install     # 安装 npm 依赖 + pm2 + cloudflared
-./deploy.sh start       # 启动 dev server + 穿透（pm2 守护）
+./deploy.sh deploy      # 一键部署（复用优先，推荐）
+./deploy.sh new         # 强制换新地址
 ./deploy.sh status      # 查看进程与穿透地址
-./deploy.sh restart     # 重启
+./deploy.sh restart     # 重启（复用优先：地址能用就不换）
 ./deploy.sh stop        # 停止
 ./deploy.sh logs        # 实时日志（Ctrl+C 退出）
 ./deploy.sh startup     # 配置登录自启（按提示执行 sudo）
 ./deploy.sh tunnel      # 查看固定域名命名隧道配置步骤
 
 # Windows（PowerShell，建议以管理员身份运行 startup）
+.\deploy.ps1 deploy     # 一键部署（复用优先，推荐）
+.\tunnel.ps1 deploy     # 同上（或直接双击「一键部署.bat」）
+.\tunnel.ps1 status     # 查看状态与地址
+.\tunnel.ps1 new        # 强制换新地址
+.\tunnel.ps1 url        # 只打印当前地址
+.\tunnel.ps1 stop       # 停止隧道
 .\deploy.ps1 install
-.\deploy.ps1 start
 .\deploy.ps1 status
 .\deploy.ps1 startup
 .\deploy.ps1 tunnel
 ```
 
-- `start` 会打印一个 `https://xxx.trycloudflare.com` 临时地址，填进飞书插件配置即可；临时地址每次重启会变，需要固定域名见 `tunnel` 子命令（需自备 Cloudflare 域名）。
+- `deploy` 会打印一个 `https://xxx.trycloudflare.com` 地址，填进飞书插件配置即可；之后只要显示「复用上一次的地址」，就不用再改配置。需要永久固定域名见 `tunnel` 子命令（需自备 Cloudflare 域名）。
+- 状态文件：`.run/tunnel.json`（记录地址、PID、生成时间），地址同时写入 `tunnel-url.txt`（这两个文件都不入库）。其他端口用 `.run/tunnel-<端口>.json`，互不干扰。
 - `startup` 注册开机/登录自启，服务器重启后自动拉起服务。
 - 模板与配置都在你本地（模板存 `templates/`），同事通过穿透地址在飞书里使用插件并提交/编辑模板。
+
+### 相关接口
+
+命令行工具不依赖这些接口（直接跑 `server/tunnelCore.js`）；接口主要供本地部署页与脚本调用：
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/tunnel/status` | 隧道/地址/进程状态 |
+| POST | `/api/tunnel/deploy` | 一键部署，`{"force":true}` 表示强制换新地址 |
+| POST | `/api/tunnel/stop` | 停止隧道（只停属于本项目端口的那个 cloudflared） |
+| GET | `/api/tunnel/probe` | 存活探针（返回实例 ID，用于判断某地址是否回连本机） |
+| GET | `/deploy` | 本地部署页（无需飞书 SDK） |
 
 ## 常见问题
 
 - **打印被拦截**：本插件用同源隐藏 iframe 打印，一般不会被弹窗拦截；若仍失败，改用“下载 Word”后在本地打印。
 - **模板功能报“无法连接本地模板服务”**：确认 dev server 正在运行，且插件地址指向的就是这个 server。
+- **断网重连后插件打不开 / 提示连接失败**：隧道地址多半已被 Cloudflare 回收。在跑服务这台电脑上**双击项目根目录的「一键部署.bat」**，它会拉起服务、复用或重新生成地址，并把可用地址打印出来；若提示地址已变更，把新地址更新到飞书插件配置即可。
+- **想彻底不再改地址**：用命名隧道 + 自有域名（`deploy.sh tunnel` / `.\deploy.ps1 tunnel` 有逐步说明），域名固定后飞书插件配置一次即可。
 - **自动匹配没生效**：到“模板管理 → 自动匹配设置”为当前表选一个匹配字段，并确认模板文件名与字段值一致。
 
 ## 开源许可

@@ -1,180 +1,78 @@
-# ============================================================
-# feishuprint tunnel manager (Windows PowerShell)
+﻿# ============================================================
+# feishuprint 内网穿透管理（Windows PowerShell 外壳）
 #
-# Usage:
-#   powershell -NoProfile -ExecutionPolicy Bypass -File .\tunnel.ps1 start
-#   powershell -NoProfile -ExecutionPolicy Bypass -File .\tunnel.ps1 restart   <- restart tunnel and show new URL
-#   powershell -NoProfile -ExecutionPolicy Bypass -File .\tunnel.ps1 stop
-#   powershell -NoProfile -ExecutionPolicy Bypass -File .\tunnel.ps1 status
-#   powershell -NoProfile -ExecutionPolicy Bypass -File .\tunnel.ps1 url
+# 本文件只是「转发器」：真正的实现在
+#     tunnel.js  +  server/tunnelCore.js
+# （与 dev server 的 /api/tunnel/* 完全同源，避免两处实现不一致）
 #
-# Or double-click tunnel.bat (same as restart).
+# 用法（在仓库目录下）：
+#   .\tunnel.ps1                一键部署（复用优先）
+#   .\tunnel.ps1 deploy         同上
+#   .\tunnel.ps1 new            强制换新地址（会更换飞书插件地址，谨慎）
+#   .\tunnel.ps1 status         查看隧道与地址状态
+#   .\tunnel.ps1 url            只打印当前地址
+#   .\tunnel.ps1 stop           停止隧道
+#   .\tunnel.ps1 deploy -Port 5199     指定端口
 #
-# Features:
-#   - auto start / reuse dev server on localhost:5173
-#   - start cloudflared quick tunnel (random host, see note below)
-#   - extract public URL from logs, save to tunnel-url.txt and print it
+# 也可直接双击「一键部署.bat」/「tunnel.bat」。
 #
-# NOTE about fixed URL: quick tunnels always get a random hostname.
-# A permanent hostname requires a named tunnel + your own domain on Cloudflare.
+# 注意：本机可能没有系统级安装 Node（只在 WorkBuddy 内置目录里），
+#       所以这里不能简单地 `Get-Command node`，要按下面的顺序兜底查找。
 # ============================================================
 param(
-  [string]$Command = 'start'
+  [Parameter(Position = 0)][string]$Command = 'deploy',
+  [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest
 )
 
 $ErrorActionPreference = 'Stop'
+$CLI = Join-Path $PSScriptRoot 'tunnel.js'
 
-$APP_DIR    = Split-Path -Parent $MyInvocation.MyCommand.Path
-$PORT       = '5173'
-$RUN_DIR    = Join-Path $APP_DIR '.run'
-$SERVER_LOG = Join-Path $RUN_DIR 'server.log'
-$TUNNEL_LOG = Join-Path $RUN_DIR 'tunnel.log'
-$TUNNEL_ERR = Join-Path $RUN_DIR 'tunnel.err.log'
-$URL_FILE   = Join-Path $APP_DIR 'tunnel-url.txt'
-$URL_RE     = 'https://[a-zA-Z0-9-]+\.trycloudflare\.com'
-$MAX_ATTEMPTS = 4
+function Find-NodeExe {
+  $cmd = Get-Command node -ErrorAction SilentlyContinue
+  if ($cmd) { return $cmd.Source }
 
-New-Item -ItemType Directory -Force -Path $RUN_DIR | Out-Null
+  $roots = @(
+    (Join-Path $env:USERPROFILE '.workbuddy\binaries\node\versions'),
+    (Join-Path $env:LOCALAPPDATA '.workbuddy\binaries\node\versions')
+  )
+  foreach ($r in $roots) {
+    if (-not (Test-Path $r)) { continue }
+    $hit = Get-ChildItem $r -Directory -ErrorAction SilentlyContinue |
+      Sort-Object Name -Descending |
+      ForEach-Object { Join-Path $_.FullName 'node.exe' } |
+      Where-Object { Test-Path $_ } |
+      Select-Object -First 1
+    if ($hit) { return $hit }
+  }
 
-function Write-Info($m) { Write-Host "[INFO] $m" -ForegroundColor Cyan }
-function Write-Ok($m)   { Write-Host "[OK]   $m" -ForegroundColor Green }
-function Write-Warn($m) { Write-Host "[WARN] $m" -ForegroundColor Yellow }
-function Write-Err($m)  { Write-Host "[ERR]  $m" -ForegroundColor Red }
+  foreach ($p in @(
+      (Join-Path $env:LOCALAPPDATA 'Programs\nodejs\node.exe'),
+      'C:\Program Files\nodejs\node.exe',
+      'C:\Program Files (x86)\nodejs\node.exe')) {
+    if (Test-Path $p) { return $p }
+  }
 
-function Test-PortListening($port) {
-  $line = netstat -ano | Select-String (":$port\s.*LISTENING")
-  return ($null -ne $line)
-}
-
-function Find-CloudflaredExe {
-  # 1) cloudflared.exe on PATH (winget install)
-  $c = Get-Command cloudflared.exe -ErrorAction SilentlyContinue
-  if ($c) { return $c.Source }
-  # 2) npm global package embedded binary
-  $p1 = Join-Path $env:APPDATA 'QClaw\npm-global\node_modules\cloudflared\bin\cloudflared.exe'
-  if (Test-Path $p1) { return $p1 }
-  # 3) winget package folder
-  $p2 = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter 'cloudflared.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($p2) { return $p2.FullName }
+  $override = Join-Path $PSScriptRoot 'node-path.txt'
+  if (Test-Path $override) {
+    $line = Get-Content $override -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($line -and (Test-Path $line.Trim())) { return $line.Trim() }
+  }
   return $null
 }
 
-function Ensure-DevServer {
-  if (Test-PortListening $PORT) {
-    Write-Ok "dev server already listening on :$PORT"
-    return
-  }
-  Write-Info "dev server not running, starting npm run start ..."
-  $cmd = "npm run start > `"$SERVER_LOG`" 2>&1"
-  Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', $cmd -WorkingDirectory $APP_DIR -WindowStyle Hidden | Out-Null
-  $deadline = (Get-Date).AddSeconds(90)
-  while ((Get-Date) -lt $deadline) {
-    Start-Sleep -Seconds 3
-    if (Test-PortListening $PORT) {
-      Write-Ok "dev server is up on :$PORT"
-      return
-    }
-  }
-  Write-Err "dev server failed to start within 90s. Check $SERVER_LOG"
+$node = Find-NodeExe
+if (-not $node) {
+  Write-Host '[错误] 没找到 Node.js' -ForegroundColor Red
+  Write-Host '       已查找：系统 PATH、WorkBuddy 内置目录、Program Files、node-path.txt'
+  Write-Host '       解决办法：把 node.exe 的完整路径写进项目根目录的 node-path.txt'
+  exit 1
+}
+if (-not (Test-Path $CLI)) {
+  Write-Host "[错误] 缺少 $CLI，仓库文件可能不完整。" -ForegroundColor Red
   exit 1
 }
 
-function Stop-Tunnel {
-  $procs = Get-Process -Name 'cloudflared' -ErrorAction SilentlyContinue
-  if ($procs) {
-    $procs | Stop-Process -Force
-    Start-Sleep -Seconds 1
-    Write-Ok "stopped old cloudflared process(es)"
-  } else {
-    Write-Info "no cloudflared process running"
-  }
-}
-
-function Start-Tunnel {
-  $exe = Find-CloudflaredExe
-  if (-not $exe) {
-    Write-Err "cloudflared.exe not found. Run deploy.ps1 install first, or install via: winget install Cloudflare.cloudflared"
-    exit 1
-  }
-
-  # Unstable DNS may kill cloudflared early; retry up to $MAX_ATTEMPTS times.
-  for ($attempt = 1; $attempt -le $MAX_ATTEMPTS; $attempt++) {
-    if ($attempt -gt 1) {
-      Write-Warn "cloudflared exited early, retrying ($attempt/$MAX_ATTEMPTS) in 3s..."
-      Start-Sleep -Seconds 3
-      Stop-Tunnel
-      Start-Sleep -Seconds 1
-    }
-
-    Write-Info "starting cloudflared tunnel -> http://localhost:$PORT (attempt $attempt/$MAX_ATTEMPTS)"
-    Remove-Item $TUNNEL_LOG, $TUNNEL_ERR -Force -ErrorAction SilentlyContinue
-    $args = @('tunnel', '--protocol', 'http2', '--edge-ip-version', '4', '--url', "http://localhost:$PORT")
-    Start-Process -FilePath $exe -ArgumentList $args -RedirectStandardOutput $TUNNEL_LOG -RedirectStandardError $TUNNEL_ERR -WindowStyle Hidden | Out-Null
-
-    # Wait for the tunnel URL in logs (up to 45s per attempt)
-    $deadline = (Get-Date).AddSeconds(45)
-    $url = $null
-    while ((Get-Date) -lt $deadline -and -not $url) {
-      Start-Sleep -Seconds 2
-      foreach ($f in @($TUNNEL_LOG, $TUNNEL_ERR)) {
-        if (Test-Path $f) {
-          $raw = Get-Content $f -Raw -ErrorAction SilentlyContinue
-          if ($raw) {
-            $m = [regex]::Match($raw, $URL_RE)
-            if ($m.Success) { $url = $m.Value; break }
-          }
-        }
-      }
-    }
-
-    if ($url) {
-      $url | Set-Content -Path $URL_FILE -Encoding UTF8
-      Write-Ok "Public URL: $url"
-      Write-Ok "Saved to: $URL_FILE"
-      Write-Warn "NOTE: temporary tunnel URL changes on every restart. Fixed URL requires a named tunnel + your own domain."
-      # Wait a bit to confirm the process stays alive (registered connection)
-      Start-Sleep -Seconds 8
-      $alive = Get-Process -Name 'cloudflared' -ErrorAction SilentlyContinue
-      if (-not $alive) {
-        Write-Warn "URL appeared but process died (network hiccup?), will retry..."
-        $url = $null
-        continue
-      }
-      return
-    }
-  }
-
-  Write-Warn "Could not establish tunnel after $MAX_ATTEMPTS attempts."
-  Write-Warn "Check logs: Get-Content `"$TUNNEL_ERR`" -Tail 30"
-  exit 1
-}
-
-function Show-Status {
-  if (Test-PortListening $PORT) { Write-Ok "dev server: running on :$PORT" }
-  else                          { Write-Warn "dev server: NOT running" }
-  $procs = Get-Process -Name 'cloudflared' -ErrorAction SilentlyContinue
-  if ($procs) { Write-Ok ("cloudflared: running (PID " + (($procs | ForEach-Object Id) -join ', ') + ")") }
-  else        { Write-Warn "cloudflared: NOT running" }
-  if (Test-Path $URL_FILE) {
-    Write-Ok ("Last public URL: " + (Get-Content $URL_FILE -Raw).Trim())
-  } else {
-    Write-Warn "No URL recorded yet (run restart first)."
-  }
-}
-
-function Show-Url {
-  if (Test-Path $URL_FILE) {
-    Write-Host ((Get-Content $URL_FILE -Raw).Trim())
-  } else {
-    Write-Err "No URL recorded yet. Run: .\tunnel.ps1 restart"
-  }
-}
-
-switch ($Command.ToLower()) {
-  'start'   { Ensure-DevServer; Stop-Tunnel; Start-Tunnel }
-  'restart' { Ensure-DevServer; Stop-Tunnel; Start-Tunnel }
-  'stop'    { Stop-Tunnel }
-  'status'  { Show-Status }
-  'url'     { Show-Url }
-  default   { Write-Err "Unknown command: $Command"; Write-Host "Usage: start / restart / stop / status / url" }
-}
+$argv = @($CLI, $Command)
+if ($Rest) { $argv += $Rest }
+& $node @argv
+exit $LASTEXITCODE

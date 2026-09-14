@@ -2,3 +2,8 @@
 *.sh text eol=lf
 *.cjs text eol=lf
 *.ps1 text eol=lf
+
+# Windows 批处理必须 CRLF：LF 行尾会让 cmd.exe 解析异常
+# （goto 找不到标签、脚本中途退出，且没有任何报错信息）
+*.bat text eol=crlf
+*.cmd text eol=crlf

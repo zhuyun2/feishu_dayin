@@ -5,11 +5,13 @@ pushd "%~dp0"
 set "LOG=%~dp0deploy-log.txt"
 
 rem ============================================================
-rem  feishuprint 内网穿透 start_tunnel.bat —— 旧入口，已改为统一逻辑
-rem  推荐直接用「一键部署.bat」，效果完全一样。
+rem  feishuprint 一键部署 —— 内网穿透地址管理
+rem  复用优先：上一次的地址还能用就直接复用，地址不变；
+rem  只有地址失效 / 隧道进程没了，才重新生成并打印新地址。
+rem  逻辑在 server/tunnelCore.js，与 dev server 的 /api/tunnel/* 同源。
 rem ============================================================
 
-echo ==================== start_tunnel.bat %DATE% %TIME% ==================== > "%LOG%"
+echo ==================== 一键部署 %DATE% %TIME% ==================== > "%LOG%"
 echo [env] CWD=%CD% >> "%LOG%"
 echo [env] PATH=%PATH% >> "%LOG%"
 

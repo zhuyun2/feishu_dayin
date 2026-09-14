@@ -56,6 +56,10 @@ module.exports = {
       require('./server/templateApi')(devServer.app);
       // 挂载 docx → PDF 转换 API（LibreOffice，保证打印分页与 Word 一致）
       require('./server/pdfApi')(devServer.app);
+      // 挂载一键部署/内网穿透 API（复用优先，见 server/tunnelApi.js 顶部说明）
+      require('./server/tunnelApi')(devServer.app, {
+        port: Number(process.env.PORT) || 5173,
+      });
       return middlewares;
     },
   },

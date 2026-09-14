@@ -124,11 +124,24 @@ export default function App() {
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               flex: 1,
+              minWidth: 0,
             }}
           >
             {active.primaryText || '请在左侧表格中选中一条记录'}
           </div>
-          <div style={{ fontSize: 12, color: '#8f959e', flexShrink: 0 }}>
+          {/* 表名限宽 + 省略号：避免超长表名把这一行挤得溢出容器 */}
+          <div
+            style={{
+              fontSize: 12,
+              color: '#8f959e',
+              flexShrink: 0,
+              maxWidth: 140,
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}
+            title={active.tableName || ''}
+          >
             {active.tableName || ''}
           </div>
         </div>
