@@ -1,0 +1,13 @@
+{
+  "tunnelName": "print4",
+  "tunnelId": "5e5981c6-6ef2-40cb-8285-933d9bc10cb4",
+  "hostname": "print4.dimeifeishudayin.icu",
+  "fixedUrl": "https://print4.dimeifeishudayin.icu",
+  "port": 5173,
+  "credentialsFile": "cloudflared/5e5981c6-6ef2-40cb-8285-933d9bc10cb4.json",
+  "certFile": "cloudflared/cert.pem",
+  "protocol": "http2",
+  "edgeIpVersion": "4",
+  "metricsPort": 20244,
+  "startAtLogin": true
+}

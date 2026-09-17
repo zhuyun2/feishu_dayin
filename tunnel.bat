@@ -5,11 +5,18 @@ pushd "%~dp0"
 set "LOG=%~dp0deploy-log.txt"
 
 rem ============================================================
-rem  feishuprint 内网穿透管理 tunnel.bat —— 与「一键部署.bat」等价
-rem  其他命令在命令行里执行：
-rem      node tunnel.js status    查看状态与地址
-rem      node tunnel.js new       强制换新地址
-rem      node tunnel.js stop      停止隧道
+rem  feishuprint LEGACY entry: quick tunnel (*.trycloudflare.com)
+rem
+rem  The project now uses a NAMED tunnel with a FIXED hostname.
+rem  Use deploy.bat (or the Chinese-named wrapper) for normal work.
+rem  This file is kept only for the legacy quick-tunnel path,
+rem  which still goes through tunnel.js (address reuses itself as
+rem  long as the cloudflared process is never restarted).
+rem
+rem  Other commands on the command line:
+rem      node tunnel.js status | new | stop | url
+rem
+rem  ASCII-only on purpose: cmd.exe desyncs on multi-byte chars under cp65001.
 rem ============================================================
 
 echo ==================== tunnel.bat %DATE% %TIME% ==================== > "%LOG%"
@@ -26,16 +33,16 @@ set "RC=%ERRORLEVEL%"
 echo [step] node exit=%RC% >> "%LOG%"
 
 echo.
-echo  [提示] 需要排查时看这两个日志：deploy-log.txt、.run\tunnel-cli.log
+echo  [hint] logs: deploy-log.txt , .run\tunnel-cli.log
 pause
 popd
 endlocal & exit /b %RC%
 
 :NONODE
 echo.
-echo  [错误] 没找到 Node.js
-echo         已查找：系统 PATH、WorkBuddy 内置目录、Program Files、node-path.txt
-echo         解决办法：把 node.exe 的完整路径写进项目根目录的 node-path.txt 后重试
+echo  [ERROR] Node.js not found.
+echo          Searched: system PATH, WorkBuddy bundled dirs, Program Files, node-path.txt
+echo          Fix: write the full path to node.exe into node-path.txt in the project root.
 echo.
 pause
 popd

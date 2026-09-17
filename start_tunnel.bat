@@ -5,8 +5,9 @@ pushd "%~dp0"
 set "LOG=%~dp0deploy-log.txt"
 
 rem ============================================================
-rem  feishuprint 内网穿透 start_tunnel.bat —— 旧入口，已改为统一逻辑
-rem  推荐直接用「一键部署.bat」，效果完全一样。
+rem  feishuprint LEGACY entry -- identical to tunnel.bat.
+rem  Kept so old shortcuts keep working. Prefer deploy.bat.
+rem  ASCII-only on purpose: cmd.exe desyncs on multi-byte chars under cp65001.
 rem ============================================================
 
 echo ==================== start_tunnel.bat %DATE% %TIME% ==================== > "%LOG%"
@@ -23,16 +24,16 @@ set "RC=%ERRORLEVEL%"
 echo [step] node exit=%RC% >> "%LOG%"
 
 echo.
-echo  [提示] 需要排查时看这两个日志：deploy-log.txt、.run\tunnel-cli.log
+echo  [hint] logs: deploy-log.txt , .run\tunnel-cli.log
 pause
 popd
 endlocal & exit /b %RC%
 
 :NONODE
 echo.
-echo  [错误] 没找到 Node.js
-echo         已查找：系统 PATH、WorkBuddy 内置目录、Program Files、node-path.txt
-echo         解决办法：把 node.exe 的完整路径写进项目根目录的 node-path.txt 后重试
+echo  [ERROR] Node.js not found.
+echo          Searched: system PATH, WorkBuddy bundled dirs, Program Files, node-path.txt
+echo          Fix: write the full path to node.exe into node-path.txt in the project root.
 echo.
 pause
 popd

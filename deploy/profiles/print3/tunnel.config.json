@@ -1,0 +1,13 @@
+{
+  "tunnelName": "print3",
+  "tunnelId": "cf9fa324-6006-47c1-bb38-717b682cbddd",
+  "hostname": "print3.dimeifeishudayin.icu",
+  "fixedUrl": "https://print3.dimeifeishudayin.icu",
+  "port": 5173,
+  "credentialsFile": "cloudflared/cf9fa324-6006-47c1-bb38-717b682cbddd.json",
+  "certFile": "cloudflared/cert.pem",
+  "protocol": "http2",
+  "edgeIpVersion": "4",
+  "metricsPort": 20243,
+  "startAtLogin": true
+}

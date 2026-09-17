@@ -783,6 +783,7 @@ module.exports = {
   probeForReuse,
   probeLocal,
   probeReady,
+  tcpPing,
   isPortListening,
   startTunnel,
   waitUntilReachable,

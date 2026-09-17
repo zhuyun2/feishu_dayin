@@ -1,14 +1,15 @@
 @echo off
 rem ============================================================
-rem  _find_node.bat —— 供其他 bat 调用：定位可用的 node.exe
-rem  结果写入变量 NODE_EXE（完整路径；值为 node 表示已在 PATH 中）。
-rem  注意：本文件故意不使用 setlocal —— 变量要留给调用方。
+rem  _find_node.bat -- helper for other bats: locate a usable node.exe
+rem  Result is written to the variable NODE_EXE (full path; "node" = already on PATH).
+rem  NOTE: no setlocal on purpose -- the variable must survive for the caller.
+rem  ASCII-only on purpose: cmd.exe desyncs on multi-byte chars under cp65001.
 rem
-rem  查找顺序：
-rem    1) 系统 PATH
-rem    2) WorkBuddy 内置 Node（递归查找 node.exe，自动适配版本目录）
-rem    3) 常见安装位置 Program Files 等
-rem    4) 项目根目录 node-path.txt 的第一行（手动兜底指定）
+rem  Lookup order:
+rem    1) system PATH
+rem    2) WorkBuddy bundled Node (recursive node.exe search, version-agnostic)
+rem    3) common install locations
+rem    4) first line of node-path.txt in the project root (manual override)
 rem ============================================================
 
 set "NODE_EXE="
@@ -25,12 +26,12 @@ if defined NODE_EXE goto :eof
 
 if exist "%LOCALAPPDATA%\Programs\nodejs\node.exe" set "NODE_EXE=%LOCALAPPDATA%\Programs\nodejs\node.exe"
 if defined NODE_EXE goto :eof
-if exist "C:\Program Files\nodejs\node.exe" set "NODE_EXE=C:\Program Files\nodejs\node.exe"
+if exist "C:/Program Files/nodejs/node.exe" set "NODE_EXE=C:/Program Files\nodejs\node.exe"
 if defined NODE_EXE goto :eof
-if exist "C:\Program Files (x86)\nodejs\node.exe" set "NODE_EXE=C:\Program Files (x86)\nodejs\node.exe"
+if exist "C:/Program Files (x86)/nodejs/node.exe" set "NODE_EXE=C:/Program Files (x86)\nodejs\node.exe"
 if defined NODE_EXE goto :eof
 
-rem 手动兜底：项目根目录 node-path.txt 第一行写 node.exe 完整路径
+rem manual override: put the full path to node.exe on line 1 of node-path.txt
 if not exist "%~dp0node-path.txt" goto :eof
 set /p NODE_EXE=<"%~dp0node-path.txt"
 if not defined NODE_EXE goto :eof

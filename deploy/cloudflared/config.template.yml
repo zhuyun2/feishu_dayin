@@ -1,0 +1,18 @@
+# 命名隧道 config 模板（由 server/namedTunnelCore.js 在部署时渲染到运行时目录）
+#
+# 占位符 __CREDENTIALS_FILE__ 会被替换为「本机绝对路径」，
+# 目标是让同一个项目文件夹复制到任何电脑后都能直接起隧道，不需要手工改路径。
+#
+# 渲染结果会写到两个地方：
+#   1) runtime/cloudflared/config.yml     —— 启动时用 --config 显式指定（项目内自洽）
+#   2) %USERPROFILE%\.cloudflared\config.yml —— 兼容直接跑 `cloudflared tunnel run feishuprint`
+
+tunnel: __TUNNEL_ID__
+credentials-file: __CREDENTIALS_FILE__
+
+# 回环地址必须写 127.0.0.1：dev server 只监听 IPv4(0.0.0.0)，
+# 写 localhost 时 cloudflared 可能解析到 ::1 导致 502。
+ingress:
+  - hostname: __HOSTNAME__
+    service: http://127.0.0.1:__PORT__
+  - service: http_status:404

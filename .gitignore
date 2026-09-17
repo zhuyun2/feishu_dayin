@@ -20,3 +20,20 @@ tunnel-url.txt
 # 一键部署的现场日志与本机 node 路径（因机器而异，不入库）
 deploy-log.txt
 node-path.txt
+
+# ==== 便携部署相关的「不入库但必须随文件夹一起复制」的目录 ====
+# 隧道凭据（含账号密钥 / 隧道密钥，入库等于把隧道交给所有能 clone 的人）。
+# 但**复制整个项目文件夹**时要一并带上，这是新电脑免授权、域名不变的唯一前提。
+deploy/cloudflared/*.json
+deploy/cloudflared/cert.pem
+!deploy/cloudflared/config.template.yml
+
+# 额外固定域名（deploy/profiles/<标识>/）的凭据同理：一律不入库。
+# 注意 tunnel.config.json 仍然入库 —— 它只有隧道 ID 和域名，没有密钥，
+# 提交它反而方便别人看清「这个项目配了哪些域名」。
+deploy/profiles/*/cloudflared/*.json
+deploy/profiles/*/cloudflared/cert.pem
+
+# 随项目携带 / 自动下载的运行时（node.exe、cloudflared.exe、渲染后的 config.yml）。
+# 目录不存在时一键部署会自动下载补齐；也可以直接从旧电脑复制过来，实现完全离线部署。
+runtime/

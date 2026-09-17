@@ -60,6 +60,11 @@ module.exports = {
       require('./server/tunnelApi')(devServer.app, {
         port: Number(process.env.PORT) || 5173,
       });
+      // 挂载「固定域名」一键部署 API 与本地部署页 /deploy
+      // （命名隧道 + 自有域名，换电脑/重启域名都不变，见 server/setupApi.js）
+      require('./server/setupApi')(devServer.app, {
+        port: Number(process.env.PORT) || 5173,
+      });
       return middlewares;
     },
   },

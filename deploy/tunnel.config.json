@@ -1,0 +1,13 @@
+{
+  "tunnelName": "feishuprint",
+  "tunnelId": "02abb661-fe4f-4fc8-b898-d27048aae8c1",
+  "hostname": "print.dimeifeishudayin.icu",
+  "fixedUrl": "https://print.dimeifeishudayin.icu",
+  "port": 5173,
+  "credentialsFile": "cloudflared/02abb661-fe4f-4fc8-b898-d27048aae8c1.json",
+  "certFile": "cloudflared/cert.pem",
+  "protocol": "http2",
+  "edgeIpVersion": "4",
+  "metricsPort": 20241,
+  "startAtLogin": true
+}

@@ -20,6 +20,8 @@
 - Node.js 16+（建议 18+）
 - npm（已提供 lock 文件）
 
+> 走下文「一键部署」时，**不需要**你自己装 Node —— 脚本检测不到会自动下载便携版到 `runtime\node\`。
+
 ## 快速开始
 
 ```bash
@@ -38,11 +40,14 @@ $env:PORT=5199; npm run start
 ## 作为飞书侧边栏插件使用
 
 1. 启动本地 dev server（上一步）。
-2. 用内网穿透工具（如 cloudflared、ngrok）把本地端口暴露为一个 HTTPS 地址，例如：
-   ```bash
-   cloudflared tunnel --url http://localhost:5199
+2. 把本地端口暴露为一个 HTTPS 地址。**本项目已配好固定域名，直接用它**：
+
    ```
-3. 在飞书多维表格的插件配置里，把插件地址填为该 HTTPS 地址。
+   https://print.dimeifeishudayin.icu
+   ```
+
+   （它是怎么来的、怎么在换机器后依然可用，见下文「长期部署」）
+3. 在飞书多维表格的插件配置里，把插件地址填为上述域名 —— **填一次，永久不变**。
 4. 在表格中从侧边栏打开插件，选中一条记录即可打印。
 
 > **重要**：本插件依赖 dev server 提供的 `/api` 接口（模板增删、匹配配置）与 `/templates` 静态目录（模板取源）。因此 **生产使用方式 = 常驻运行 dev server + 内网穿透**，而不是把 `dist/` 当静态站点托管（那样没有后端 API）。
@@ -127,11 +132,26 @@ npm run build
 │   └── <tableId>/*.docx    # 每张数据表的模板，按表隔离
 ├── server/
 │   ├── templateApi.js      # 模板/配置 API（挂载到 dev server）
-│   ├── tunnelCore.js       # 内网穿透核心逻辑（复用优先；CLI 与 API 共用这一份）
-│   └── tunnelApi.js        # 内网穿透 HTTP 接口 + 本地 /deploy 页面
-├── tunnel.js               # 内网穿透命令行（一键部署的本体）
-├── 一键部署.bat             # 双击即部署（断网后恢复地址用这个）
-├── tunnel.bat / tunnel.ps1 # 同上，等价入口
+│   ├── pdfApi.js           # PDF / 盖章相关 API
+│   ├── stampProcessor.js   # 盖章图像处理
+│   ├── namedTunnelCore.js  # ★ 命名隧道核心（固定域名：凭据/下载/启停/自启/多域名 profile）
+│   ├── cloudflareApi.js    # ★ Cloudflare API 客户端（只给 add-domain 用）
+│   ├── setupCore.js        # ★ 一键部署 CLI（deploy/status/doctor/stop/restart/url/profiles/add-domain）
+│   ├── setupApi.js         # ★ 部署相关 HTTP 接口 + 本机 /deploy 管理页
+│   ├── tunnelCore.js       # 内网穿透核心（备用：临时隧道 *.trycloudflare.com）
+│   └── tunnelApi.js        # 备用：临时隧道的 HTTP 接口
+├── deploy/                 # ★ 随项目携带的隧道配置（复制项目时务必带上）
+│   ├── tunnel.config.json  # default 域名：隧道名 / ID / 固定域名 / 端口
+│   ├── cloudflared/        # default 域名的凭据（隧道密钥 + config 模板）
+│   └── profiles/<标识>/     # 额外固定域名，每个一套独立配置与凭据
+│       ├── tunnel.config.json
+│       └── cloudflared/
+├── tools/get-node.ps1      # ★ 新机器没有 Node 时，自动下载便携版到 runtime\node\
+├── runtime/                # 运行时产物（Node 便携版、cloudflared.exe、渲染后的 config.yml；不入库）
+├── _find_node.bat          # ★ Node 定位（便携版 → 环境变量 → PATH）
+├── deploy.bat              # ★ 一键部署本体（纯 ASCII，Windows 原生）
+├── 一键部署.bat             # ★ 中文名入口，转发到 deploy.bat（双击这个）
+├── 自启开关.bat             # ★ 开/关「开机自启」（双击，或写参数 on / off）
 ├── src/
 │   ├── index.tsx           # 入口
 │   ├── App.tsx             # 三页签编排
@@ -144,128 +164,206 @@ npm run build
 └── package.json
 ```
 
-## 长期部署（常驻服务 + 内网穿透）
+## 长期部署（常驻服务 + 固定域名隧道）
 
-生产使用方式 = 常驻运行 dev server（含 `/api` 与 `/templates`）+ 内网穿透暴露 HTTPS，供飞书插件访问。
+生产使用方式 = 常驻运行 dev server（含 `/api` 与 `/templates`）+ cloudflared **命名隧道**暴露 HTTPS，供飞书插件访问。
+
+**插件地址是固定域名，永久不变：**
+
+```
+https://print.dimeifeishudayin.icu
+```
+
+在飞书插件配置里填 **一次** 即可 —— 重启电脑、断网、甚至把整个项目文件夹复制到另一台电脑，地址都不用改。
 
 ### 一键部署（推荐：双击项目里的执行文件）
 
-「一键部署」是一枚**项目内的可执行文件**，而不是插件里的按钮 ——
+「一键部署」是**项目内的执行文件 / 本机管理页**，而不是插件里的按钮 ——
 因为隧道一断，飞书里根本打不开插件，插件里的按钮也就点不到。
 
 | 入口 | 位置 | 说明 |
 |------|------|------|
-| **`一键部署.bat`**（推荐） | 仓库根目录，双击运行 | 地址过期 / 断网恢复后跑一次即可，窗口保留结果 |
-| `tunnel.bat` | 仓库根目录，双击运行 | 与上面等价 |
-| 命令行 | `node tunnel.js deploy` | 等价功能，另可 `status` / `url` / `new` / `stop` |
-| PowerShell | `.\tunnel.ps1 deploy` | 只是转发到 `node tunnel.js`，兼容旧用法 |
-| 本地部署页 | `http://localhost:5173/deploy` | 需要在网页上点的时候用（等价功能） |
+| **`一键部署.bat`**（推荐） | 仓库根目录，**双击** | 一键部署；已装好的机器上它就是「恢复服务」 |
+| 本机管理页 | `http://127.0.0.1:5173/deploy` | 图形界面：一键部署按钮 + 状态灯 + 开机自启开关 |
+| `deploy.bat` | 仓库根目录 | 与 `一键部署.bat` 等价（后者只是中文名转发壳） |
+| `自启开关.bat` | 仓库根目录，双击 | 开 / 关「开机自启」，也可写参数 `on` / `off` |
 
-跑完之后会直接打印**可用的内网穿透地址**，照着填进飞书插件配置即可：
+命令行等价能力：
 
-```
- [隧道动作] 复用上一次的地址（未重启隧道）
- [公网检查] 地址可达
-------------------------------------------------------------
- 内网穿透地址：
-
-   https://xxxx.trycloudflare.com
-
-------------------------------------------------------------
- 结论：地址未变，飞书插件配置无需修改。
-```
-
-`一键部署.bat` 的执行顺序（**不需要你先把服务起起来**）：
-
-1. 确认本地服务在跑，没跑就自动拉起；
-2. 探测上一次的地址是否还能回连到本机（多试几次，避免瞬时抖动误判）；
-3. 能用 → **直接复用，绝不重启隧道，地址不变**；不能用 → 才重新生成；
-4. 打印地址并写入 `tunnel-url.txt`（地址有变化时还会复制到剪贴板，方便粘贴）。
-
-```bash
-node tunnel.js            # 一键部署（复用优先）
-node tunnel.js new        # 强制换新地址（地址必变，需更新飞书插件配置）
-node tunnel.js status     # 查看隧道 / 地址 / 进程状态
-node tunnel.js url        # 只输出当前地址（便于脚本取值）
-node tunnel.js stop       # 停止隧道
-node tunnel.js --help     # 全部选项（--port / --json / --quiet / --timeout）
+```bat
+deploy.bat                :: 一键部署（推荐）
+deploy.bat status         :: 查看本次部署状态
+deploy.bat doctor         :: 体检：逐项自检并给出修复建议
+deploy.bat restart        :: 重启隧道（域名不变）
+deploy.bat stop           :: 停止隧道
+deploy.bat url            :: 只输出固定域名（便于脚本取值）
+deploy.bat profiles       :: 列出本机已配的固定域名
+deploy.bat --profile p2   :: 部署指定域名（多域名时用）
+deploy.bat add-domain p3 print3.xxx.icu   :: 新增一个固定域名
+deploy.bat autostart on   :: 开；off 关「开机自启」
 ```
 
-### 内网穿透地址为什么能保持不换
+### 一键部署做了哪 6 件事
 
-cloudflared 的临时隧道（`*.trycloudflare.com`）域名由 Cloudflare **随机分配**，客户端无法指定；
-但它在 **cloudflared 进程存活期间保持不变**（短暂断网自动重连也不会变），
-Cloudflare 只会在隧道断连超过约 5 分钟后回收域名。
+**不需要你先把服务起起来** —— 脚本会自己补齐一切：
 
-所以「一键部署」的做法是 **复用优先**：
+| 步骤 | 内容 | 自动化行为 |
+|------|------|-----------|
+| 1 | 运行环境 | 找 Node.js；**找不到就自动下载便携版**到 `runtime\node\` |
+| 2 | 隧道凭据 | 把项目内 `deploy/cloudflared/` 的密钥装进 `~\.cloudflared\`，并按**本机绝对路径**渲染 `config.yml` |
+| 3 | 项目依赖 | `node_modules` 缺失时自动 `npm install` |
+| 4 | 本地服务 | dev server(:5173) 没跑就自动拉起 |
+| 5 | 隧道 | 启动命名隧道，等到 `/ready=200` 才算成功（写法不兼容时会自动换一种命令形式重试） |
+| 6 | 公网校验 | 从**公网**访问固定域名，确认真的回连到本机这套服务 |
 
-1. 先探测上一次的地址是否仍可用（进程活着 **并且** 该地址能回连到本机这套服务——用 `instanceId` 校验，避免误用别的域名）；
-2. 可用 → **直接复用，绝不重启隧道，地址保持不变**（飞书插件配置不用改）；
-3. 单次探测失败不急着换地址：会再重试几次（本地服务刚重启、边缘抖动都会让一次探测失败，白换地址的代价太大）；
-4. 只有确认失效 → 才重新生成新地址，并明确提示「地址已变更，请更新飞书插件配置」。
+跑完最后会注册**登录自启**：在启动目录放一个 `feishuprint-autostart.vbs`，
+登录 Windows 时静默拉起服务与隧道（**不需要管理员权限**，也不弹黑框）。
 
-> 旧版脚本的问题就在第 2 步：`start`/`restart` 会先 `delete` 再 `start` cloudflared，
-> 等于每次都重启隧道进程，所以地址每次都变。现在已改为复用优先。
+> 断网 / 重启后想手动恢复：双击 `一键部署.bat` 即可；开着自启的话通常什么都不用做。
 
-需要「重启电脑、断网很久之后地址也永远不变」时，必须用 **命名隧道 + 自有域名**（见下方 `tunnel` 子命令）。
+### 复制到另一台电脑（换机部署）
 
-长期挂机还可以用仓库自带的两套脚本（隧道逻辑与 `tunnel.js` **同源**，都在 `server/tunnelCore.js`）：
+前提：新电脑能上网。
 
-| 系统 | 脚本 | 说明 |
-|------|------|------|
-| macOS / Linux | `deploy.sh` | pm2 守护 dev server；隧道由 `/api/tunnel/*` 管理；`start_at_login.sh` 供 LaunchAgent 登录自启 |
-| Windows | `deploy.ps1` | 同上，PowerShell 实现；用计划任务实现登录自启 |
+1. 复制**整个项目文件夹**（关键是 `deploy/` 必须带上 —— 隧道密钥在里面，这是新机器能自举的前提）。
+2. 新电脑上双击 `一键部署.bat`。
+3. 等它跑完，用浏览器打开 `https://print.dimeifeishudayin.icu` 能出管理页就算成功。
 
-常用命令：
+新电脑上**不需要预装任何东西**：没有 Node 会自动下载便携版，没有 cloudflared 也会自动下载到 `runtime\cloudflared\`。
 
-```bash
-# macOS / Linux
-./deploy.sh install     # 安装 npm 依赖 + pm2 + cloudflared
-./deploy.sh deploy      # 一键部署（复用优先，推荐）
-./deploy.sh new         # 强制换新地址
-./deploy.sh status      # 查看进程与穿透地址
-./deploy.sh restart     # 重启（复用优先：地址能用就不换）
-./deploy.sh stop        # 停止
-./deploy.sh logs        # 实时日志（Ctrl+C 退出）
-./deploy.sh startup     # 配置登录自启（按提示执行 sudo）
-./deploy.sh tunnel      # 查看固定域名命名隧道配置步骤
+> ⚠️ **同一时间只能有一台电脑在跑同一条隧道。** 固定域名在 Cloudflare 侧只指向一条隧道连接，
+> 两台机器同时跑会互相顶掉、出现间歇性 502。换机器时请先在旧电脑执行 `deploy.bat stop`，
+> 或关掉旧电脑的开机自启（`自启开关.bat off`）。
 
-# Windows（PowerShell，建议以管理员身份运行 startup）
-.\deploy.ps1 deploy     # 一键部署（复用优先，推荐）
-.\tunnel.ps1 deploy     # 同上（或直接双击「一键部署.bat」）
-.\tunnel.ps1 status     # 查看状态与地址
-.\tunnel.ps1 new        # 强制换新地址
-.\tunnel.ps1 url        # 只打印当前地址
-.\tunnel.ps1 stop       # 停止隧道
-.\deploy.ps1 install
-.\deploy.ps1 status
-.\deploy.ps1 startup
-.\deploy.ps1 tunnel
+### 多台电脑 / 多个固定域名
+
+**一个固定域名 = 一条独立隧道。** 两台电脑不能共用同一条（会随机分流到两台机器、
+数据不一致），所以给每台电脑配各自的域名，部署时选一下即可：
+
+目前本机已配好 4 个可选域名：
+
+| 域名标识（profile） | 固定域名 | metrics 端口 | 说明 |
+|--------------------|----------|--------------|------|
+| `default` | `https://print.dimeifeishudayin.icu` | 20241 | 历史默认域名，沿用它原来的路径 |
+| `print2` | `https://print2.dimeifeishudayin.icu` | 20242 | |
+| `print3` | `https://print3.dimeifeishudayin.icu` | 20243 | |
+| `print4` | `https://print4.dimeifeishudayin.icu` | 20244 | |
+
+#### 新增一个域名（不用进 Cloudflare 后台）
+
+```bat
+deploy.bat add-domain print5 print5.dimeifeishudayin.icu
 ```
 
-- `deploy` 会打印一个 `https://xxx.trycloudflare.com` 地址，填进飞书插件配置即可；之后只要显示「复用上一次的地址」，就不用再改配置。需要永久固定域名见 `tunnel` 子命令（需自备 Cloudflare 域名）。
-- 状态文件：`.run/tunnel.json`（记录地址、PID、生成时间），地址同时写入 `tunnel-url.txt`（这两个文件都不入库）。其他端口用 `.run/tunnel-<端口>.json`，互不干扰。
-- `startup` 注册开机/登录自启，服务器重启后自动拉起服务。
-- 模板与配置都在你本地（模板存 `templates/`），同事通过穿透地址在飞书里使用插件并提交/编辑模板。
+它会自动：**建隧道 → 下载/写入凭据 → 配 DNS 的 CNAME → 落盘配置**。
+它用的是 `deploy/cloudflared/cert.pem` 里的 ARGO TUNNEL TOKEN（内含 API 令牌），
+新域名必须是该文件所属账号下已托管域名的子域。创建后等约 20~60 秒 DNS 才生效。
+
+#### 查看与选择
+
+```bat
+deploy.bat profiles                  :: 列出本机已配的域名
+deploy.bat --profile print2          :: 部署指定域名
+deploy.bat url --profile print2      :: 只看某个域名的地址
+deploy.bat doctor --profile print2   :: 体检指定域名
+```
+
+双击「一键部署.bat」时，**若本机配了多个域名，会先弹菜单让你选**（直接回车 = 上次用的那个）。
+
+登录自启**不弹菜单**：它把域名写死在启动脚本里（`--profile <标识>`），
+所以登录后拉起的永远是你最近部署过的那个域名 —— 不会出现「等输入而静默卡死」。
+若自启绑的域名和你当前用的不一致，`deploy.bat doctor` 会直接点出来。
+
+#### 每个域名的文件互相隔离
+
+```
+deploy/
+├── tunnel.config.json          # default 域名的配置（沿用历史路径）
+├── cloudflared/                # default 域名的凭据
+└── profiles/
+    ├── print2/
+    │   ├── tunnel.config.json  # print2 的配置
+    │   └── cloudflared/        # print2 的凭据（隧道密钥 + 令牌）
+    ├── print3/                 # 同上
+    └── print4/                 # 同上
+```
+
+运行时产物同样按域名隔离：`.run/print3-named-tunnel.*`、`runtime/cloudflared/print3.config.yml`，
+metrics 端口也错开（default `20241` 起，依次 `20242` / `20243` / `20244`）——所以同一台电脑上多个域名可以并存不打架，
+`stop`/`restart` 也只会动你指定的那一个。
+
+> 换机器时建议**先删掉 `runtime/` 再复制**：里面是本机的运行时产物（Node 便携版、cloudflared、
+> 「上次用的域名」记录），新机器会自动重建，删掉还能省几百 MB。但 `deploy/` **必须带上** ——
+> 隧道密钥在里面，这是新机器能自举的前提。
+
+### 固定域名为什么能不变
+
+用的是 cloudflared **命名隧道（Named Tunnel）**：域名 `print.dimeifeishudayin.icu` 已在 Cloudflare
+解析并绑定到隧道 `feishuprint`，指向由 Cloudflare 侧决定，**与进程是否重启无关**。
+这正是它比临时隧道（`*.trycloudflare.com`，随机分配、进程一停就可能被回收）可靠的地方。
+
+相关文件：
+
+| 文件 | 作用 |
+|------|------|
+| `deploy/tunnel.config.json` | 隧道名、隧道 ID、固定域名、端口（**唯一事实来源**） |
+| `deploy/cloudflared/*.json` | 隧道密钥 —— 换机器必须带上（已进 `.gitignore`，不会误提交） |
+| `runtime/cloudflared/config.yml` | 每次部署按本机路径重新渲染的 cloudflared 配置（**勿手改**，会被覆盖） |
+
+> 隧道入口统一指向 `http://127.0.0.1:<port>` 而不是 `localhost`：
+> dev server 只监听 IPv4（`0.0.0.0`），写 `localhost` 时 cloudflared 可能解析到 `::1`，
+> 造成间歇性 502（`dial tcp [::1]:5173: connection refused`）。
+
+### 备用：旧的临时隧道（地址随机，不推荐）
+
+项目里仍保留早期基于临时隧道（`*.trycloudflare.com`）的一套脚本，作为应急备用。
+它的地址由 Cloudflare 随机分配、**重启进程就可能变**，因此**不能**作为长期方案；
+它内部有一套「复用优先」逻辑：进程活着就不重启，地址在进程存活期间不会变。
+
+| 入口 | 说明 |
+|------|------|
+| `tunnel.bat` / `start_tunnel.bat` | 本地临时隧道（复用优先） |
+| `node tunnel.js` | 临时隧道命令行：`status` / `url` / `new` / `stop` |
+| `deploy.sh` | macOS / Linux 的常驻部署脚本（pm2 + LaunchAgent） |
+| `服务端更新清单.md` | 历史运维记录 |
+
+临时隧道的状态文件是 `.run/tunnel.json`（记录地址、PID、生成时间），地址同时写入 `tunnel-url.txt`。
+**这两个文件不要删** —— 删掉等于放弃「复用上一次地址」的能力。
 
 ### 相关接口
 
-命令行工具不依赖这些接口（直接跑 `server/tunnelCore.js`）；接口主要供本地部署页与脚本调用：
-
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/tunnel/status` | 隧道/地址/进程状态 |
-| POST | `/api/tunnel/deploy` | 一键部署，`{"force":true}` 表示强制换新地址 |
-| POST | `/api/tunnel/stop` | 停止隧道（只停属于本项目端口的那个 cloudflared） |
+| GET | `/api/setup/status` | 固定域名部署状态（含凭据 / 隧道 / 自启各项体检结果） |
+| GET | `/api/setup/profiles` | 本机已配置的域名列表 + 当前用哪个 |
+| POST | `/api/setup/deploy` | 一键部署（幂等，可重复调用） |
+| POST | `/api/setup/stop` | 停止隧道 |
+| POST | `/api/setup/autostart` | 开关开机自启，`{"enabled":true\|false}` |
+| GET | `/deploy` | 本机部署管理页（不需要飞书 SDK） |
+| GET | `/api/tunnel/status` | 临时隧道状态（备用） |
+| POST | `/api/tunnel/deploy` | 临时隧道部署（备用，`{"force":true}` 强制换新地址） |
+| POST | `/api/tunnel/stop` | 停止临时隧道（备用） |
 | GET | `/api/tunnel/probe` | 存活探针（返回实例 ID，用于判断某地址是否回连本机） |
-| GET | `/deploy` | 本地部署页（无需飞书 SDK） |
 
 ## 常见问题
 
 - **打印被拦截**：本插件用同源隐藏 iframe 打印，一般不会被弹窗拦截；若仍失败，改用“下载 Word”后在本地打印。
 - **模板功能报“无法连接本地模板服务”**：确认 dev server 正在运行，且插件地址指向的就是这个 server。
-- **断网重连后插件打不开 / 提示连接失败**：隧道地址多半已被 Cloudflare 回收。在跑服务这台电脑上**双击项目根目录的「一键部署.bat」**，它会拉起服务、复用或重新生成地址，并把可用地址打印出来；若提示地址已变更，把新地址更新到飞书插件配置即可。
-- **想彻底不再改地址**：用命名隧道 + 自有域名（`deploy.sh tunnel` / `.\deploy.ps1 tunnel` 有逐步说明），域名固定后飞书插件配置一次即可。
+- **插件打不开 / 提示连接失败**：在跑服务这台电脑上双击项目根目录的 **`一键部署.bat`**，它会补齐依赖、拉起服务、启动隧道并做公网校验，最后把可用域名打印出来。固定域名正常情况下不需要改飞书配置。
+- **不确定哪里出问题**：跑 `deploy.bat doctor`，会逐项自检并给出修复建议。
+  其中「连接器数量」这一项是**专门用来抓多机冲突的**：一条隧道正常只有 1 个连接器（4 条连接），
+  连上 8 条就说明这台隧道上挂着两台电脑，`doctor` 会直接告诉你去哪台机器上执行停用命令。
+- **想确认自启是否生效**：跑 `deploy.bat status`，或打开 `http://127.0.0.1:5173/deploy` 看状态灯。
+- **间歇性 502**：先跑 `deploy.bat doctor --profile <标识>` 看「连接器数量」——
+  如果是 8 条（两台机器连了同一条隧道），Cloudflare 会把请求随机分给两台机器，
+  症状就是时好时坏、间歇 502、打印出来的内容对不上。在多余的那台机器上执行
+  `deploy.bat stop --profile <标识>` 即可。若连接器数量正常，再看本机 dev server 有没有起来。
+- **新加的域名打开报 530**：DNS 刚创建，Cloudflare 边缘还在生效（通常 20~60 秒）。稍等再刷；
+  若超过 5 分钟仍是 530，说明那台电脑上的隧道没跑起来，跑 `deploy.bat doctor --profile <标识>` 看哪一项没过。
+- **要在第二台电脑用另一个域名**：先跑一次 `deploy.bat add-domain <标识> <域名>` 建好域名，
+  再把项目文件夹复制到第二台（建议先删掉 `runtime/`），双击「一键部署.bat」并在菜单里选那个标识。
+- **自启拉起来的是错的域名**：`deploy.bat doctor` 会直接标出「自启绑的域名与当前不一致」，
+  在要用的那台机器上重跑一次 `deploy.bat --profile <标识>` 即可纠正。
 - **自动匹配没生效**：到“模板管理 → 自动匹配设置”为当前表选一个匹配字段，并确认模板文件名与字段值一致。
 
 ## 开源许可
