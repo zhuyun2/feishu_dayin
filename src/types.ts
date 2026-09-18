@@ -21,6 +21,39 @@ export interface TableMatchConfig {
 // 全局匹配配置（/api/config）
 export interface MatchConfig {
   tables: Record<string, TableMatchConfig>;
+  // 下载文件命名规则：按数据表保存（键为 tableId），对该表下所有模板生效。
+  // 独立于 tables，便于将来单独扩展；读写都必须整体回传，避免被覆盖丢失。
+  downloadNames?: Record<string, DownloadNameConfig>;
+}
+
+// ============ 下载文件命名 ============
+
+// 命名规则可直接引用的系统变量（不依赖表格字段）
+export type NameSysKey =
+  | 'date'         // 当天日期 2026-09-18
+  | 'time'         // 当前时间 1530
+  | 'datetime'     // 2026-09-18_1530
+  | 'tableName'    // 数据表名称
+  | 'templateName' // 模板名称（不含扩展名）
+  | 'recordId';    // 记录 ID
+
+// 命名规则中的一个片段
+export interface NamePart {
+  kind: 'field' | 'text' | 'sys';
+  // kind='field'：优先按 fieldId 取值；跨表复用规则时按 fieldName 兜底匹配同名字段
+  fieldId?: string;
+  fieldName?: string;
+  // kind='text'：固定文本
+  text?: string;
+  // kind='sys'：系统变量
+  sys?: NameSysKey;
+}
+
+// 下载文件命名规则（按表持久化到 /api/config 的 downloadNames[tableId]）
+export interface DownloadNameConfig {
+  enabled: boolean;   // 关闭时沿用默认命名（模板名-主字段值）
+  parts: NamePart[];  // 片段顺序即拼接顺序
+  join: string;       // 片段之间的连接符，默认 '-'
 }
 
 // 字段元信息（对 SDK IFieldMeta 的最小约束，含 link 字段的 property.tableId）

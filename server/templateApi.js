@@ -105,6 +105,50 @@ function send(res, status, body) {
   res.status(status).json(body);
 }
 
+// ============ 下载命名规则（downloadNames）落盘校验 ============
+// 前端结构：{ [tableId]: { enabled, join, parts: [{kind:'field'|'text'|'sys', ...}] } }
+// 这里做轻量清洗：过滤非法 tableId / 未知片段，避免脏数据让前端渲染异常。
+
+const NAME_SYS_KEYS = ['date', 'time', 'datetime', 'tableName', 'templateName', 'recordId'];
+
+function cleanNamePart(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  if (raw.kind === 'text') {
+    return { kind: 'text', text: String(raw.text == null ? '' : raw.text).slice(0, 60) };
+  }
+  if (raw.kind === 'sys') {
+    if (NAME_SYS_KEYS.indexOf(raw.sys) === -1) return null;
+    return { kind: 'sys', sys: raw.sys };
+  }
+  if (raw.kind === 'field') {
+    const fieldId = typeof raw.fieldId === 'string' ? raw.fieldId.slice(0, 64) : '';
+    const fieldName = typeof raw.fieldName === 'string' ? raw.fieldName.slice(0, 120) : '';
+    if (!fieldId && !fieldName) return null;
+    return { kind: 'field', fieldId, fieldName };
+  }
+  return null;
+}
+
+function cleanDownloadNames(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  Object.keys(raw).forEach((tableId) => {
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(tableId)) return;
+    const cfg = raw[tableId];
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return;
+    const parts = (Array.isArray(cfg.parts) ? cfg.parts : [])
+      .slice(0, 20)
+      .map(cleanNamePart)
+      .filter(Boolean);
+    out[tableId] = {
+      enabled: !!cfg.enabled,
+      join: typeof cfg.join === 'string' ? cfg.join.slice(0, 4) : '-',
+      parts,
+    };
+  });
+  return out;
+}
+
 module.exports = function attach(app) {
   ensureStore();
 
@@ -193,12 +237,20 @@ module.exports = function attach(app) {
 
   app.put('/api/config', express.json(), (req, res) => {
     try {
-      const body = req.body;
-      if (!body || typeof body !== 'object' || typeof body.tables !== 'object' || body.tables === null) {
-        throw httpError(400, '配置格式错误，需为 { tables: {...} }');
+     const body = req.body;
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        throw httpError(400, '配置格式错误，需为 JSON 对象');
       }
-      fs.writeFileSync(CONFIG_PATH, JSON.stringify(body, null, 2), 'utf8');
-      send(res, 200, body);
+      if (body.tables != null && (typeof body.tables !== 'object' || Array.isArray(body.tables))) {
+        throw httpError(400, 'tables 需为对象');
+      }
+      // 只落盘已知字段（tables + downloadNames），避免未知字段污染配置文件
+      const next = {
+        tables: body.tables && typeof body.tables === 'object' ? body.tables : {},
+        downloadNames: cleanDownloadNames(body.downloadNames),
+      };
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2), 'utf8');
+      send(res, 200, next);
     } catch (e) {
       send(res, e.status || 500, { error: e.message });
     }

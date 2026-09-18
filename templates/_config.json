@@ -10,5 +10,27 @@
         "通过"
       ]
     }
+  },
+  "downloadNames": {
+    "tbl4rkmTWj4CuLgp": {
+      "enabled": true,
+      "join": "-",
+      "parts": [
+        {
+          "kind": "field",
+          "fieldId": "fld4RcTWEG",
+          "fieldName": "名称"
+        },
+        {
+          "kind": "field",
+          "fieldId": "fld2QGBmDr",
+          "fieldName": "产品批号"
+        },
+        {
+          "kind": "sys",
+          "sys": "date"
+        }
+      ]
+    }
   }
 }

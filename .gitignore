@@ -37,3 +37,7 @@ deploy/profiles/*/cloudflared/cert.pem
 # 随项目携带 / 自动下载的运行时（node.exe、cloudflared.exe、渲染后的 config.yml）。
 # 目录不存在时一键部署会自动下载补齐；也可以直接从旧电脑复制过来，实现完全离线部署。
 runtime/
+
+# 临时测试文件
+.tmp_test_*.cjs
+scripts/test-*.cjs

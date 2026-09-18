@@ -18,6 +18,8 @@ import { stampDocxBlob, arrayBufferToBase64 } from '../services/docxStamp';
 import type { OverlayStamp, PageOverlayResult } from '../services/stampOverlay';
 import { resolveAutoSelection } from '../services/templateMatch';
 import { checkPrintAllowed } from '../services/printCheck';
+import { buildDownloadName, defaultBaseName } from '../services/downloadName';
+import DownloadNameModal, { DownloadNameEntryButton } from './DownloadNameSetting';
 import { createRequestGate } from '../services/requestGate';
 import { currentPreviewBlob } from '../services/previewBlob';
 import {
@@ -37,6 +39,7 @@ interface Props {
   templates: TemplateInfo[];
   matchConfig: MatchConfig;
   onNeedTemplates: () => void;
+  onConfigChanged: (cfg: MatchConfig) => void;
   goManage: () => void;
   goStamp: () => void;
 }
@@ -60,12 +63,13 @@ const ORIENTATION_LABEL: Record<PrintOrientation, string> = {
   landscape: '横向',
 };
 
-export default function PrintTab({ active, templates, matchConfig, onNeedTemplates, goManage, goStamp }: Props) {
+export default function PrintTab({ active, templates, matchConfig, onNeedTemplates, onConfigChanged, goManage, goStamp }: Props) {
   const [selected, setSelected] = useState<string | null>(null);
   const [manual, setManual] = useState(false);
   const [matchKind, setMatchKind] = useState<MatchKind>('none');
   const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
   const [previewTemplateName, setPreviewTemplateName] = useState<string | null>(null);
+  const [nameModalOpen, setNameModalOpen] = useState(false);
   const [orientation, setOrientation] = useState<PrintOrientation>('auto');
   const [multiCopy, setMultiCopy] = useState(false);
   const DEFAULT_COPIES = ['生产部', '销售部', '客户', '财务部', '开票'];
@@ -439,9 +443,24 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
       }
     }
     const ext = isXlsx ? '.xlsx' : '.docx';
-    const base = selected ? selected.replace(/\.(docx|xlsx)$/i, '') : '打印';
-    const suffix = active.primaryText ? `-${active.primaryText}` : '';
-    saveAs(blob, `${base}${suffix}${ext}`);
+    // 文件名按「下载命名」规则生成：规则按表保存、对该表所有模板生效；
+    // 未设置规则时回退 模板名-主字段值（与旧行为一致）。
+    const nameConfig = active.tableId ? matchConfig.downloadNames?.[active.tableId] : undefined;
+    let fileName: string;
+    try {
+      fileName = await buildDownloadName({
+        config: nameConfig,
+        table: active.table,
+        fieldMetas: active.fieldMetas,
+        tableName: active.tableName,
+        recordId: active.recordId,
+        templateName: selected || '打印.docx',
+        primaryText: active.primaryText,
+      });
+    } catch (e) {
+      fileName = defaultBaseName(selected || '打印.docx', active.primaryText);
+    }
+    saveAs(blob, `${fileName}${ext}`);
   };
 
   const templateOptions = useMemo(
@@ -769,7 +788,23 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
         >
           <DownloadOutlined /> 下载
         </Button>
+        <DownloadNameEntryButton
+          size="middle"
+          style={{ height: 38, borderRadius: 8, flexShrink: 0 }}
+          config={active.tableId ? matchConfig.downloadNames?.[active.tableId] : undefined}
+          onClick={() => setNameModalOpen(true)}
+          disabled={!active.tableId}
+        />
       </div>
+
+      <DownloadNameModal
+        open={nameModalOpen}
+        active={active}
+        matchConfig={matchConfig}
+        templateName={selected}
+        onClose={() => setNameModalOpen(false)}
+        onSaved={onConfigChanged}
+      />
     </div>
   );
 }

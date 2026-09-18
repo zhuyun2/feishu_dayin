@@ -5,6 +5,8 @@ import type { UploadProps } from 'antd';
 import type { TemplateInfo, MatchConfig } from '../types';
 import type { ActiveRecordState } from '../hooks/useActiveRecord';
 import { uploadTemplate, deleteTemplate, copyTemplate, putConfig, templateDownloadUrl } from '../services/templateApi';
+import { describeNameConfig } from '../services/downloadName';
+import DownloadNameModal from './DownloadNameSetting';
 
 interface Props {
   active: ActiveRecordState;
@@ -38,6 +40,7 @@ export default function TemplateManageTab({
   const [savingConfig, setSavingConfig] = useState(false);
   const [showMatchEdit, setShowMatchEdit] = useState(false);
   const [showCheckEdit, setShowCheckEdit] = useState(false);
+  const [nameModalOpen, setNameModalOpen] = useState(false);
   const [checkDraft, setCheckDraft] = useState<{
     enabled: boolean;
     fieldId?: string;
@@ -64,6 +67,11 @@ export default function TemplateManageTab({
   )?.name;
 
   const tableId = active.tableId;
+
+  // 下载命名规则（按表保存，对该表所有模板生效）
+  const nameRuleDesc = describeNameConfig(
+    active.tableId ? matchConfig.downloadNames?.[active.tableId] : undefined
+  );
 
   const doUpload = async (file: File, overwrite: boolean): Promise<boolean> => {
     if (!tableId) { message.error('未连接到数据表，无法上传'); return false; }
@@ -158,7 +166,8 @@ export default function TemplateManageTab({
     if (!active.tableId) return;
     setSavingConfig(true);
     try {
-      const next: MatchConfig = { tables: { ...matchConfig.tables } };
+      // 展开完整 config（含 downloadNames 等顶层字段），避免整体 PUT 时丢字段
+      const next: MatchConfig = { ...matchConfig, tables: { ...matchConfig.tables } };
       if (!fieldId) {
         delete next.tables[active.tableId];
       } else {
@@ -194,7 +203,7 @@ export default function TemplateManageTab({
     if (!active.tableId || !checkDraft) return;
     setSavingConfig(true);
     try {
-      const next: MatchConfig = { tables: { ...matchConfig.tables } };
+      const next: MatchConfig = { ...matchConfig, tables: { ...matchConfig.tables } };
       const base = next.tables[active.tableId] || { matchFieldId: '', matchFieldName: '' };
       const meta = checkDraft.fieldId
         ? active.fieldMetas.find((f) => f.id === checkDraft.fieldId)
@@ -386,6 +395,34 @@ export default function TemplateManageTab({
         </div>
       )}
 
+      {/* 下载文件命名 */}
+      <div
+        style={{
+          fontSize: 12,
+          color: '#646a73',
+          background: '#f2f0ff',
+          borderRadius: 8,
+          padding: '10px 12px',
+          display: 'flex',
+          gap: 8,
+          alignItems: 'flex-start',
+          lineHeight: 1.5,
+          flexShrink: 0,
+        }}
+      >
+        <span style={{ flexShrink: 0 }}>🏷️</span>
+        <span style={{ flex: 1 }}>
+          下载命名：{nameRuleDesc ? <>按 <b>{nameRuleDesc}</b> 生成文件名</> : '未设置（用「模板名-主字段值」）'}
+          {' '}— 设置一次，本表所有模板点「下载」都按此规则命名。
+          <a
+            onClick={() => setNameModalOpen(true)}
+            style={{ color: '#3370FF', marginLeft: 4, cursor: 'pointer' }}
+          >
+            设置
+          </a>
+        </span>
+      </div>
+
       {/* 模板卡片列表 */}
       {filtered.length === 0 ? (
         <Empty description={keyword ? '无匹配模板' : '还没有模板，点右上角上传'} style={{ marginTop: 24 }} />
@@ -527,6 +564,15 @@ export default function TemplateManageTab({
           onPressEnter={handleCopy}
         />
       </Modal>
+
+      <DownloadNameModal
+        open={nameModalOpen}
+        active={active}
+        matchConfig={matchConfig}
+        templateName={templates[0]?.name ?? null}
+        onClose={() => setNameModalOpen(false)}
+        onSaved={onConfigChanged}
+      />
     </div>
   );
 }

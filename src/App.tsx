@@ -179,6 +179,7 @@ export default function App() {
                   templates={templates}
                   matchConfig={matchConfig}
                   onNeedTemplates={refreshTemplates}
+                  onConfigChanged={(cfg) => setMatchConfig(cfg)}
                   goManage={() => setActiveKey('manage')}
                   goStamp={() => setActiveKey('stamp')}
                 />
