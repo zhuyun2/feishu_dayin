@@ -165,6 +165,7 @@ export default function VariablePanel({ active }: Props) {
             <p style={{ margin: '2px 0' }}>5. <strong>分页与求和</strong>：在模板正文任意处放一行指令（渲染时自动隐藏）：<br/>
               <Text code>{'@@PAGE field=产品明细 size=5 sum=数量:合计数量,金额:合计金额 @@'}</Text><br/>
               field=循环明细字段；size=每页行数；sum=需求和的数字列（col:输出变量，多个用逗号）。超量时自动拆成多页同格式出货单，并注入 <Text code>{'{合计数量}'}</Text>、<Text code>{'{页码}'}</Text>、<Text code>{'{总页数}'}</Text>。复制后的模板可在「模板编辑」里直接改这行参数。</p>
+            <p style={{ margin: '2px 0' }}>6. <strong>合并字段</strong>：想把两个字段合并成一个值输出，写成 <Text code>{'{{细菌数量}{细菌乘方}}'}</Text>（双花括号里依次放各字段）。随后到「打印」页的 <strong>🔗 合并字段</strong> 面板设置输出方式（直接拼接 / 科学计数法 / 数值乘积）与输出条件（字段 &gt; / = / 非空 等，可并、可或）。例：细菌数量 × 10 的「细菌乘方」次方 → <Text code>2.2×10³</Text>。未设置时默认把各字段紧密拼接。</p>
           </div>
         }
       />

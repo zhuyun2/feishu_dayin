@@ -32,5 +32,43 @@
         }
       ]
     }
+  },
+  "mergeFields": {
+    "tble2mwmhsfMYUVr": {
+      "细菌数量|细菌乘方v2": {
+        "join": "and",
+        "conditions": [
+          {
+            "field": "细菌数量",
+            "op": "gt",
+            "value": "0"
+          }
+        ],
+        "output": {
+          "mode": "scientific",
+          "separator": "",
+          "mantissaField": "",
+          "exponentField": "",
+          "superscript": true,
+          "times": "×10",
+          "precision": null,
+          "fallback": "<10"
+        }
+      },
+      "真菌数量|真菌乘方v2": {
+        "join": "and",
+        "conditions": [],
+        "output": {
+          "mode": "scientific",
+          "separator": "",
+          "mantissaField": "",
+          "exponentField": "",
+          "superscript": true,
+          "times": "×10",
+          "precision": null,
+          "fallback": ""
+        }
+      }
+    }
   }
 }

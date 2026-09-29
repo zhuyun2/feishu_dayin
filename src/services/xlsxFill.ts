@@ -1,5 +1,6 @@
 import PizZip from 'pizzip';
-import type { PrintDataValue, LinkedRow } from '../types';
+import type { PrintDataValue, LinkedRow, MergeBindOptions } from '../types';
+import { rewriteMergeXml, signatureFields } from './mergeField';
 import { amountToChinese } from './money';
 
 const MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -205,9 +206,11 @@ function setRowBreaks(sheetXml: string, breaks: number[]): string {
 }
 
 // 用数据填充 xlsx 模板，返回填充后的 Blob（下载/预览三用）。
+// merge：合并字段（复合占位符 {{A}{B}}）支持，需在共享字符串内联之后、占位符替换之前重写。
 export function fillXlsx(
   templateBuffer: ArrayBuffer,
-  data: Record<string, PrintDataValue>
+  data: Record<string, PrintDataValue>,
+  merge?: MergeBindOptions
 ): Blob {
   const zip = new PizZip(templateBuffer);
   const ssFile = zip.file('xl/sharedStrings.xml');
@@ -221,11 +224,26 @@ export function fillXlsx(
   // 1) 内联共享字符串，占位符进入 sheet
   sheetXml = inlineSharedStrings(sheetXml, strings);
 
-  // 2) 处理明细循环
+  // 2) 合并字段（复合占位符）：重写为规整标签并补进数据
+  let payload = data;
+  if (merge) {
+    const rw = rewriteMergeXml(sheetXml);
+    if (rw.order.length > 0) {
+      sheetXml = rw.xml;
+      const extra: Record<string, PrintDataValue> = {};
+      for (const signature of rw.order) {
+        const tag = rw.tags[signature];
+        if (payload[tag] == null) extra[tag] = merge.resolve(signature, signatureFields(signature));
+      }
+      payload = { ...data, ...extra };
+    }
+  }
+
+  // 3) 处理明细循环
   const loopField = findLoopField(sheetXml);
   let loopRowNum = 0;
   if (loopField) {
-    const rows: LinkedRow[] = Array.isArray(data[loopField]) ? (data[loopField] as LinkedRow[]) : [];
+    const rows: LinkedRow[] = Array.isArray(payload[loopField]) ? (payload[loopField] as LinkedRow[]) : [];
     const sdMatch = sheetXml.match(/<sheetData>([\s\S]*?)<\/sheetData>/);
     if (sdMatch) {
       const sheetData = sdMatch[1];
@@ -251,7 +269,7 @@ export function fillXlsx(
           const pageAfter = after.map((r) => renumberRow(r.xml, r.r, r.r + detailDelta));
           const pageSums = computeAutoSums(chunk);
           const pageData: Record<string, PrintDataValue> = {
-            ...data,
+            ...payload,
             ...pageSums,
             合计金额大写: amountToChinese(pageSums.合计金额),
             金额大写: amountToChinese(pageSums.合计金额),
@@ -269,18 +287,21 @@ export function fillXlsx(
         sheetXml = setRowBreaks(sheetXml, Array.from({ length: pageCount - 1 }, (_, i) => pageHeight * (i + 1)));
 
         const sums = computeAutoSums(dataRows);
+        const extra: Record<string, PrintDataValue> = {};
         for (const [k, v] of Object.entries(sums)) {
-          if (data[k] == null) data[k] = v;
+          if (payload[k] == null) extra[k] = v;
         }
         // 合计金额大写（若模板用到 {合计金额大写}/{金额大写}）
-        if (data['合计金额大写'] == null) data['合计金额大写'] = amountToChinese(data['合计金额']);
-        if (data['金额大写'] == null) data['金额大写'] = amountToChinese(data['合计金额']);
+        const total = payload['合计金额'] == null ? sums['合计金额'] : payload['合计金额'];
+        if (payload['合计金额大写'] == null) extra['合计金额大写'] = amountToChinese(total);
+        if (payload['金额大写'] == null) extra['金额大写'] = amountToChinese(total);
+        payload = { ...payload, ...extra };
       }
     }
   }
 
-  // 3) 替换普通占位符
-  sheetXml = fillScalars(sheetXml, data);
+  // 4) 替换普通占位符
+  sheetXml = fillScalars(sheetXml, payload);
 
   zip.file(sheetName, sheetXml);
   return zip.generate({ type: 'blob', mimeType: MIME, compression: 'DEFLATE' }) as Blob;

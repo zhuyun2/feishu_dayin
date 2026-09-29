@@ -6,7 +6,7 @@ import {
 } from '@ant-design/icons';
 import { saveAs } from 'file-saver';
 
-import type { TemplateInfo, MatchConfig, MatchKind, StampConfig, StampInfo, StampPageSetting } from '../types';
+import type { TemplateInfo, MatchConfig, MatchKind, StampConfig, StampInfo, StampPageSetting, MergeHit } from '../types';
 import { DEFAULT_STAMP_CONFIG, STAMP_POSITION_LABEL } from '../types';
 import type { ActiveRecordState } from '../hooks/useActiveRecord';
 import { fetchTemplateBuffer } from '../services/templateApi';
@@ -14,6 +14,9 @@ import { listStamps, fetchStampBuffer, fetchStampBase64, stampUrl } from '../ser
 import { buildPrintData } from '../services/dataBuilder';
 import { fillTemplate, explainDocxError } from '../services/docxFill';
 import { fillXlsx, isXlsxName } from '../services/xlsxFill';
+import { detectTemplateMerges } from '../services/mergeDetect';
+import { makeMergeResolver } from '../services/mergeField';
+import MergeFieldModal, { MergeFieldRuleButton } from './MergeFieldSetting';
 import { stampDocxBlob, arrayBufferToBase64 } from '../services/docxStamp';
 import type { OverlayStamp, PageOverlayResult } from '../services/stampOverlay';
 import { resolveAutoSelection } from '../services/templateMatch';
@@ -98,6 +101,32 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
   const [overlayStamps, setOverlayStamps] = useState<OverlayStamp[]>([]);
   const stampConfigRef = useRef<StampConfig>(stampConfig);
   stampConfigRef.current = stampConfig;
+
+  // ===== 合并字段（复合占位符 {{A}{B}}）=====
+  const [mergeHits, setMergeHits] = useState<MergeHit[]>([]);
+  const [mergePanelOpen, setMergePanelOpen] = useState(false);
+  const [mergeEditing, setMergeEditing] = useState<MergeHit | null>(null);
+  const mergeRules = active.tableId ? matchConfig.mergeFields?.[active.tableId] : undefined;
+
+  // 选中模板后检测其中的复合占位符（供面板展示；填充时以实际取到的模板字节为准再检测一次）
+  useEffect(() => {
+    if (!selected || !active.tableId) {
+      setMergeHits([]);
+      return;
+    }
+    let cancelled = false;
+    const tableId = active.tableId;
+    (async () => {
+      try {
+        const buf = await fetchTemplateBuffer(tableId, selected);
+        if (cancelled) return;
+        setMergeHits(detectTemplateMerges(buf, selected));
+      } catch (e) {
+        if (!cancelled) setMergeHits([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selected, active.tableId]);
 
   // 按表加载印章列表
   useEffect(() => {
@@ -270,8 +299,22 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
       const { data, warnings: w } = await buildPrintData(
         active.table, active.tableName, active.fieldMetas, active.recordId
       );
+
+      // 合并字段：先检测模板里的复合占位符，按已保存规则算出各签名输出值再填充。
+      // 条件字段可引用本表任意字段，取值口径与模板占位符完全一致（都用显示字符串）。
+      const hits = detectTemplateMerges(buffer, selected);
+      if (isCurrent()) setMergeHits(hits);
+      const mergeOpts = hits.length > 0
+        ? {
+            resolve: makeMergeResolver(mergeRules, (field: string) => {
+              const v = data[field];
+              return v == null || Array.isArray(v) ? '' : String(v);
+            }),
+          }
+        : undefined;
+
       const isX = isXlsxName(selected);
-      const blob = isX ? fillXlsx(buffer, data) : fillTemplate(buffer, data);
+      const blob = isX ? fillXlsx(buffer, data, mergeOpts) : fillTemplate(buffer, data, mergeOpts);
 
       // 电子盖章：预览/打印走 JS 叠加（干净 blob，docx-preview 渲染后盖 img）；
       // 下载时再另行把印章以浮动图片注入 docx（posOffset，Word 语义正确）
@@ -307,7 +350,7 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
     } finally {
       if (isCurrent()) setRendering(false);
     }
-  }, [selected, active.tableId, active.table, active.recordId, active.tableName, active.fieldMetas, stamps]);
+  }, [selected, active.tableId, active.table, active.recordId, active.tableName, active.fieldMetas, stamps, mergeRules]);
 
   useEffect(() => {
     generationGateRef.current.invalidate();
@@ -326,6 +369,9 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
   }, [active.tableId, selected, active.recordId, stampConfig, generate]);
 
   const isXlsx = !!selected && isXlsxName(selected);
+
+  // 未设置规则的合并字段数量（用于面板角标提醒）
+  const mergeUnsetCount = mergeHits.filter((h) => !mergeRules?.[h.signature]).length;
 
   // 打印校验配置
   const checkCfg = active.tableId ? matchConfig.tables[active.tableId] : undefined;
@@ -665,6 +711,46 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
           )}
         </div>
 
+        {/* 合并字段（复合占位符）面板 */}
+        {selected && (
+          <div style={{ background: '#fff', borderRadius: 10, boxShadow: '0 1px 4px rgba(31,35,41,.06)', padding: '0 12px', flexShrink: 0 }}>
+            <div
+              onClick={() => setMergePanelOpen((v) => !v)}
+              style={{ cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '9px 0', userSelect: 'none' }}
+            >
+              <span style={{ fontSize: 13, fontWeight: 600, color: '#1f2329' }}>🔗 合并字段</span>
+              {mergeHits.length > 0 && (
+                <Tag color={mergeUnsetCount > 0 ? 'orange' : 'purple'} style={{ margin: '0 0 0 8px' }}>
+                  {mergeHits.length} 个{mergeUnsetCount > 0 ? ` · ${mergeUnsetCount} 未设置` : ''}
+                </Tag>
+              )}
+              <span style={{ marginLeft: 'auto', fontSize: 12, color: '#8f959e' }}>
+                {mergePanelOpen ? '收起 ▲' : '展开 ▼'}
+              </span>
+            </div>
+            {mergePanelOpen && (
+              <div style={{ paddingBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {mergeHits.length === 0 ? (
+                  <Text type="secondary" style={{ fontSize: 12, lineHeight: 1.7 }}>
+                    本模板未检测到合并字段。在 Word/Excel 模板里把多个字段连写成
+                    <Text code style={{ fontSize: 12 }}>{'{{字段A}{字段B}}'}</Text>
+                    ，即可在这里为它设置输出方式与条件（例：按「细菌数量」「细菌乘方」输出 2.2×10³）。
+                  </Text>
+                ) : (
+                  mergeHits.map((h) => (
+                    <MergeFieldRuleButton
+                      key={h.signature}
+                      fields={h.fields}
+                      rule={mergeRules?.[h.signature]}
+                      onClick={() => setMergeEditing(h)}
+                    />
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* 错误 / 警告 */}
         {errors.length > 0 && (
           <Alert
@@ -803,6 +889,15 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
         matchConfig={matchConfig}
         templateName={selected}
         onClose={() => setNameModalOpen(false)}
+        onSaved={onConfigChanged}
+      />
+
+      <MergeFieldModal
+        open={!!mergeEditing}
+        active={active}
+        matchConfig={matchConfig}
+        merge={mergeEditing}
+        onClose={() => setMergeEditing(null)}
         onSaved={onConfigChanged}
       />
     </div>

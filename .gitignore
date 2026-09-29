@@ -41,3 +41,8 @@ runtime/
 # 临时测试文件
 .tmp_test_*.cjs
 scripts/test-*.cjs
+
+# 测试脚本
+scripts/test-*.cjs
+# 服务端变更记录（不入库）
+服务端更新清单*.md

@@ -24,6 +24,8 @@ export interface MatchConfig {
   // 下载文件命名规则：按数据表保存（键为 tableId），对该表下所有模板生效。
   // 独立于 tables，便于将来单独扩展；读写都必须整体回传，避免被覆盖丢失。
   downloadNames?: Record<string, DownloadNameConfig>;
+  // 合并字段（复合占位符）输出规则：mergeFields[tableId][签名] = 规则
+  mergeFields?: Record<string, MergeFieldConfig>;
 }
 
 // ============ 下载文件命名 ============
@@ -130,6 +132,93 @@ export interface StampConfig {
   anchor?: StampAnchor; // 最近一次锚定文字定位结果（百分比），下载注入复用（单页/兼容兜底）
   pages?: Record<number, StampPageSetting>; // 多页模板按页控制：是否盖章 + 每页锚点
 }
+
+// ============ 合并字段（复合占位符）============
+// 模板里写 {{字段A}{字段B}}：填充前由插件把整段替换为单花括号标签 {__MERGEn}，
+// 并按下面这套规则算出该标签的输出值（可带条件判断与科学计数法等输出格式）。
+
+// 条件比较符
+export type MergeCondOp =
+  | 'eq'        // 等于（两边都是数字时按数值比较）
+  | 'ne'        // 不等于
+  | 'gt'        // 大于
+  | 'gte'       // 大于等于
+  | 'lt'        // 小于
+  | 'lte'       // 小于等于
+  | 'contains'  // 包含
+  | 'notEmpty'; // 非空
+
+// 条件组合方式：and=并（全部满足）/ or=或（任一满足）
+export type MergeJoin = 'and' | 'or';
+
+// 输出方式
+export type MergeOutputMode =
+  | 'concat'      // 直接拼接各字段值
+  | 'scientific'  // 科学计数法：尾数×10^指数（指数取指数字段）
+  | 'product';    // 数值乘积：尾数 × 10 的指数次方，输出普通数字
+
+// 单条条件
+export interface MergeCondition {
+  field: string; // 条件字段名（表字段，可与复合占位符内的字段不同）
+  op: MergeCondOp;
+  value?: string; // 比较值；notEmpty 忽略
+}
+
+// 输出设置
+export interface MergeOutput {
+  mode: MergeOutputMode;
+  separator?: string;         // concat：字段之间的连接符，默认空（紧密拼接）
+  mantissaField?: string;     // scientific / product：尾数字段，默认取占位符第 1 个字段
+  exponentField?: string;     // scientific / product：指数字段，默认取占位符第 2 个字段
+  superscript?: boolean;      // scientific：指数用上标字符（³）而非 ^3，默认 true
+  times?: string;             // scientific：底数文本，默认 '×10'
+  precision?: number | null;  // 尾数保留小数位；null/undefined = 原样输出
+  fallback?: string;          // 条件不满足时的输出，默认空串
+}
+
+// 一个合并字段的完整规则
+export interface MergeRule {
+  join: MergeJoin;
+  conditions: MergeCondition[];
+  output: MergeOutput;
+}
+
+// 某张表下的全部合并字段规则：键为「签名」（占位符内字段名按顺序用 | 连接）
+export type MergeFieldConfig = Record<string, MergeRule>;
+
+// 模板里检测到的一个复合占位符
+export interface MergeHit {
+  signature: string; // 如 细菌数量|细菌乘方
+  fields: string[];  // 如 ['细菌数量','细菌乘方']
+}
+
+// 填充引擎使用的合并绑定：把签名解析为「生成标签 → 输出值」
+export interface MergeBindOptions {
+  resolve: (signature: string, fields: string[]) => string;
+}
+
+export const MERGE_OP_LABEL: Record<MergeCondOp, string> = {
+  eq: '等于',
+  ne: '不等于',
+  gt: '大于',
+  gte: '大于等于',
+  lt: '小于',
+  lte: '小于等于',
+  contains: '包含',
+  notEmpty: '非空',
+};
+
+export const MERGE_MODE_LABEL: Record<MergeOutputMode, string> = {
+  concat: '直接拼接',
+  scientific: '科学计数法',
+  product: '数值乘积',
+};
+
+export const DEFAULT_MERGE_RULE: MergeRule = {
+  join: 'and',
+  conditions: [],
+  output: { mode: 'concat', separator: '', superscript: true, times: '×10' },
+};
 
 export const DEFAULT_STAMP_CONFIG: StampConfig = {
   stamps: [],

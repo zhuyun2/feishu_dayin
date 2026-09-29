@@ -1,10 +1,14 @@
 import PizZip from 'pizzip';
 import Docxtemplater from 'docxtemplater';
-import type { PrintDataValue, LinkedRow } from '../types';
+import type { PrintDataValue, LinkedRow, MergeBindOptions } from '../types';
 import { extractParagraphs, setParagraphText, getBodyParts, PAGE_BREAK, trimTrailingEmptyParagraphsInZip } from './docxText';
+import { rewriteMergeXml, createMergeRegistry, signatureFields } from './mergeField';
 import { amountToChinese } from './money';
 
 const MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+// docxtemplater 会一并渲染的正文/页眉页脚 part —— 合并字段在这几处都要改写
+const MERGE_PART_RE = /^word\/(?:document|header\d+|footer\d+)\.xml$/i;
 
 // ============ 分页规则（模板内指令） ============
 // 模板正文里写一行（引擎渲染时自动剔除，不打印）：
@@ -119,26 +123,59 @@ function generateBlob(zip: PizZip): Blob {
 
 // 用数据填充 .docx 模板，返回填充后的 Blob（预览/打印/下载三用）。
 // 若模板内含 @@PAGE 分页指令，则按规则自动分页、求和、标注页码并合并为多页 docx。
+// merge：合并字段（复合占位符 {{A}{B}}）支持。传入后先把这些片段换成规整标签，
+// 并把算出的输出值并入填充数据；不传则完全保持旧行为。
 export function fillTemplate(
   templateBuffer: ArrayBuffer,
-  data: Record<string, PrintDataValue>
+  data: Record<string, PrintDataValue>,
+  merge?: MergeBindOptions
 ): Blob {
   const zip0 = new PizZip(templateBuffer);
-  const docXml0 = zip0.file('word/document.xml')!.asText();
+  const docPart = 'word/document.xml';
+  let docXml0 = zip0.file(docPart)!.asText();
+
+  // 合并字段：先重写正文与页眉页脚里的复合占位符，再把输出值补进数据。
+  // docxtemplater 会一并渲染页眉页脚，那里若有 {{A}{B}} 同样会报重复开标签，
+  // 因此这些 part 必须一起改写，且共用一套全局标签编号。
+  let payload = data;
+  if (merge) {
+    const registry = createMergeRegistry();
+    Object.keys(zip0.files)
+      .filter((name) => MERGE_PART_RE.test(name))
+      .forEach((name) => {
+        const file = zip0.file(name);
+        if (!file) return;
+        const raw = file.asText();
+        const rewritten = rewriteMergeXml(raw, registry);
+        if (rewritten.xml !== raw) zip0.file(name, rewritten.xml);
+      });
+
+    if (registry.order.length > 0) {
+      docXml0 = zip0.file(docPart)!.asText();
+      const extra: Record<string, PrintDataValue> = {};
+      for (const signature of registry.order) {
+        const tag = registry.tags[signature];
+        if (payload[tag] == null) extra[tag] = merge.resolve(signature, signatureFields(signature));
+      }
+      payload = { ...data, ...extra };
+    }
+  }
+
   const found = findPageRule(docXml0);
 
   // 无分页指令：直接渲染
   if (!found) {
-    return generateBlob(renderToZip(zip0, data));
+    return generateBlob(renderToZip(zip0, payload));
   }
 
-  // 有分页指令：剔除指令段落（置空，保留结构避免 Word 修复提示），得到干净模板字节
+  // 有分页指令：剔除指令段落（置空，保留结构避免 Word 修复提示），得到干净模板字节。
+  // 复用 zip0 —— 它已写入重写后的 document.xml 与页眉页脚，不能再从原始字节重建。
   const cleanedXml = docXml0.replace(found.block, setParagraphText(found.block, ''));
-  const cleanedZip = new PizZip(templateBuffer);
-  cleanedZip.file('word/document.xml', cleanedXml);
+  const cleanedZip = zip0;
+  cleanedZip.file(docPart, cleanedXml);
   const cleanedBytes = cleanedZip.generate({ type: 'arraybuffer' }) as ArrayBuffer;
 
-  const arr = data[found.rule.field];
+  const arr = payload[found.rule.field];
   const rows: LinkedRow[] = Array.isArray(arr) ? (arr as LinkedRow[]) : [];
   const pages = chunkArray(rows, found.rule.size);
 
@@ -152,7 +189,7 @@ export function fillTemplate(
       if (/金额|总价|金额合计|合计金额/.test(k)) upper[`${k}大写`] = amountToChinese(v);
     }
     const pageData: Record<string, PrintDataValue> = {
-      ...data,
+      ...payload,
       [found.rule.field]: paddedChunk,
       页码: i + 1,
       总页数: pages.length,

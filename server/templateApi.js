@@ -149,6 +149,65 @@ function cleanDownloadNames(raw) {
   return out;
 }
 
+// ============ 合并字段规则（mergeFields）落盘校验 ============
+// 前端结构：{ [tableId]: { [签名]: { join, conditions[], output{} } } }
+// 签名形如 细菌数量|细菌乘方（占位符内字段名按顺序用 | 连接）。
+
+const MERGE_OPS = ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'contains', 'notEmpty'];
+const MERGE_MODES = ['concat', 'scientific', 'product'];
+
+function cleanMergeCondition(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const field = typeof raw.field === 'string' ? raw.field.slice(0, 120).trim() : '';
+  if (!field) return null;
+  return {
+    field,
+    op: MERGE_OPS.indexOf(raw.op) !== -1 ? raw.op : 'eq',
+    value: raw.value == null ? '' : String(raw.value).slice(0, 120),
+  };
+}
+
+function cleanMergeRule(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const o = raw.output && typeof raw.output === 'object' && !Array.isArray(raw.output) ? raw.output : {};
+  const precision = Number.isInteger(o.precision) && o.precision >= 0 && o.precision <= 6 ? o.precision : null;
+  return {
+    join: raw.join === 'or' ? 'or' : 'and',
+    conditions: (Array.isArray(raw.conditions) ? raw.conditions : [])
+      .slice(0, 10)
+      .map(cleanMergeCondition)
+      .filter(Boolean),
+    output: {
+      mode: MERGE_MODES.indexOf(o.mode) !== -1 ? o.mode : 'concat',
+      separator: typeof o.separator === 'string' ? o.separator.slice(0, 8) : '',
+      mantissaField: typeof o.mantissaField === 'string' ? o.mantissaField.slice(0, 120) : '',
+      exponentField: typeof o.exponentField === 'string' ? o.exponentField.slice(0, 120) : '',
+      superscript: o.superscript !== false,
+      times: typeof o.times === 'string' && o.times ? o.times.slice(0, 8) : '×10',
+      precision,
+      fallback: typeof o.fallback === 'string' ? o.fallback.slice(0, 60) : '',
+    },
+  };
+}
+
+function cleanMergeFields(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  Object.keys(raw).forEach((tableId) => {
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(tableId)) return;
+    const bySignature = raw[tableId];
+    if (!bySignature || typeof bySignature !== 'object' || Array.isArray(bySignature)) return;
+    const rules = {};
+    Object.keys(bySignature).slice(0, 50).forEach((signature) => {
+      if (!signature || signature.length > 200) return;
+      const rule = cleanMergeRule(bySignature[signature]);
+      if (rule) rules[signature] = rule;
+    });
+    if (Object.keys(rules).length > 0) out[tableId] = rules;
+  });
+  return out;
+}
+
 module.exports = function attach(app) {
   ensureStore();
 
@@ -244,10 +303,11 @@ module.exports = function attach(app) {
       if (body.tables != null && (typeof body.tables !== 'object' || Array.isArray(body.tables))) {
         throw httpError(400, 'tables 需为对象');
       }
-      // 只落盘已知字段（tables + downloadNames），避免未知字段污染配置文件
+      // 只落盘已知字段（tables + downloadNames + mergeFields），避免未知字段污染配置文件
       const next = {
         tables: body.tables && typeof body.tables === 'object' ? body.tables : {},
         downloadNames: cleanDownloadNames(body.downloadNames),
+        mergeFields: cleanMergeFields(body.mergeFields),
       };
       fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2), 'utf8');
       send(res, 200, next);
