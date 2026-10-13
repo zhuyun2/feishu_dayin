@@ -1,7 +1,8 @@
 import type {
-  MergeRule, MergeCondition, MergeCondOp, MergeHit, MergeOutputMode, MergeFieldConfig,
+  MergeRule, MergeBranch, MergeCondition, MergeCondOp, MergeHit, MergeOutputMode,
+  MergeBindOptions, MergeScope, PrintDataValue, LinkedRow, RawMergeRule, MergeOutput,
 } from '../types';
-import { DEFAULT_MERGE_RULE } from '../types';
+import { DEFAULT_MERGE_BRANCH } from '../types';
 import { parseAmount } from './money';
 
 // ============================================================================
@@ -114,6 +115,22 @@ export function scanMerges(xml: string): MergeHit[] {
   return Array.from(seen.values());
 }
 
+// 扫描一段 XML 里被用作循环的字段名（{#字段}）。
+// 与 scanMerges 同理：占位符可能被 Word 按 run 拆开（如 {#F_key | 微检市场需求表 | }），
+// 因此走「跳标签的文本流」而非直接正则匹配原始 XML。
+// 用途：数据层据此判断哪些嵌套关联字段需要展开成数组（两层循环）。
+export function scanLoopFields(xml: string): string[] {
+  const { text } = buildTextStream(xml);
+  const names = new Set<string>();
+  const re = /\{#([^{}]+)\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const name = unescapeXml(m[1]).trim();
+    if (name) names.add(name);
+  }
+  return Array.from(names);
+}
+
 // ============ 重写 ============
 
 export interface MergeRewriteResult {
@@ -209,11 +226,41 @@ function compareValues(left: string, op: MergeCondOp, right: string): boolean {
 }
 
 // 条件是否全部/任一满足。无条件 = 视为满足（无条件输出）。
-export function evaluateConditions(rule: MergeRule | undefined, getValue: (field: string) => string): boolean {
+// 入参兼容 MergeBranch（新）与旧的 MergeRule（单分支），二者都只用到 join + conditions。
+export function evaluateConditions(
+  rule: Pick<MergeBranch, 'join' | 'conditions'> | undefined,
+  getValue: (field: string) => string
+): boolean {
   const conds = ((rule?.conditions || []) as MergeCondition[]).filter((c) => c && c.field);
   if (!conds.length) return true;
   const results = conds.map((c) => compareValues(getValue(c.field), c.op, c.value ?? ''));
   return rule?.join === 'or' ? results.some(Boolean) : results.every(Boolean);
+}
+
+// ============ 分支读取（新旧格式兼容）============
+
+// 把一个原始规则（可能是旧版单分支形态）归一成分支数组。
+// 旧形态 { join, conditions, output.fallback } 的语义是「条件不满足 → fallback」，
+// 迁移时把 fallback 提升为末尾的「无条件固定文本分支」，行为与旧版完全一致。
+export function toBranches(rule: RawMergeRule | MergeRule | undefined): MergeBranch[] {
+  const r = rule as RawMergeRule | undefined;
+  if (!r) return [];
+  if (Array.isArray(r.branches)) return r.branches.filter((b) => b && typeof b === 'object');
+
+  const conds = r.conditions || [];
+  const out = r.output;
+  if (!conds.length && !out) return [];
+
+  const branches: MergeBranch[] = [{
+    join: r.join === 'or' ? 'or' : 'and',
+    conditions: conds,
+    output: normalizeMergeOutput(out),
+  }];
+  const fb = out?.fallback;
+  if (typeof fb === 'string' && fb !== '') {
+    branches.push({ join: 'and', conditions: [], output: { mode: 'text', text: fb, fallback: '' } });
+  }
+  return branches;
 }
 
 // ============ 输出格式 ============
@@ -235,18 +282,17 @@ export function formatMergeNumber(n: number, precision?: number | null): string 
   return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(6)));
 }
 
-// 算出某个签名的输出值。
+// 按一种输出设置算出文本。
 // 未配置规则时退化为「直接紧密拼接各字段值」，保证模板不会输出原始的 {{...}}。
-export function buildMergeValue(
-  rule: MergeRule | undefined,
+function renderOutput(
+  out: MergeOutput | undefined,
   fields: string[],
   getValue: (field: string) => string
 ): string {
-  const out = rule?.output;
   const fallback = out?.fallback ?? '';
-  if (rule && !evaluateConditions(rule, getValue)) return fallback;
-
   const mode: MergeOutputMode = out?.mode ?? 'concat';
+
+  if (mode === 'text') return out?.text ?? '';
 
   if (mode === 'concat') {
     return fields.map((f) => getValue(f)).join(out?.separator ?? '');
@@ -270,58 +316,199 @@ export function buildMergeValue(
   return `${mantText}${times}${expPart}`;
 }
 
-// 供填充引擎使用的解析器：签名 + 字段名 → 输出值
+// 规则是否已配置（区别于「没配过」）：
+//   undefined / {}          → 未配置，退化为紧密拼接
+//   { branches: [] }        → 已配置但没有分支，输出空串
+function isConfigured(rule: RawMergeRule | MergeRule | undefined): boolean {
+  if (!rule) return false;
+  const r = rule as RawMergeRule;
+  if (Array.isArray(r.branches)) return true;
+  return !!(r.conditions || r.output);
+}
+
+// 算出某个签名的输出值：按分支顺序匹配，第一个条件满足的分支生效；都不命中输出空串。
+export function buildMergeValue(
+  rule: RawMergeRule | MergeRule | undefined,
+  fields: string[],
+  getValue: (field: string) => string
+): string {
+  if (!isConfigured(rule)) return renderOutput(undefined, fields, getValue);
+
+  for (const b of toBranches(rule)) {
+    if (evaluateConditions(b, getValue)) return renderOutput(b.output, fields, getValue);
+  }
+  return '';
+}
+
+// 供填充引擎使用的解析器：签名 + 字段名（+ 循环行作用域）→ 输出值
 export function makeMergeResolver(
-  rules: MergeFieldConfig | undefined,
-  readField: (field: string) => string
-): (signature: string, fields: string[]) => string {
-  return (signature, fields) => buildMergeValue(rules?.[signature], fields, readField);
+  rules: Record<string, RawMergeRule> | undefined,
+  readField: (field: string, scope?: MergeScope) => string
+): (signature: string, fields: string[], scope?: MergeScope) => string {
+  return (signature, fields, scope) =>
+    buildMergeValue(rules?.[signature], fields, (f) => readField(f, scope));
+}
+
+// ============ 循环内的取值下沉 ============
+
+// 把生成标签 {__MERGEn} 的取值下沉到每一个明细行。
+// 为什么需要：docxtemplater 取值时先在当前行找、找不到才逐级回退外层作用域，
+// 而合并字段原先只在顶层算一次 —— 循环里的复合占位符引用的若是子表字段
+// （顶层数据里不存在同名键），就会一律算成空串 / fallback。
+// 行内写入后，行内值优先，未命中的仍回退到顶层值，顶层行为不变。
+//
+// 顺带做一次「取不到值」诊断：循环行里引用的字段全为空时，按规则只会输出 fallback
+// （未配置就是空），这类静默空白最容易被当成「字段值没获取到」，故汇总提示一次。
+export function attachMergeTagsToRows(
+  payload: Record<string, PrintDataValue>,
+  registry: MergeRegistry,
+  merge: MergeBindOptions
+): void {
+  if (!registry.order.length) return;
+
+  // 预扫：明细行里出现过的普通字段名（用来判断某签名引用的字段是不是「行内字段」）
+  const rowKeys = new Set<string>();
+  const collect = (rows: LinkedRow[]) => {
+    for (const row of rows) {
+      for (const key of Object.keys(row)) {
+        const v = row[key];
+        if (Array.isArray(v)) collect(v as unknown as LinkedRow[]);
+        else rowKeys.add(key);
+      }
+    }
+  };
+  for (const key of Object.keys(payload)) {
+    const v = payload[key];
+    if (Array.isArray(v)) collect(v as unknown as LinkedRow[]);
+  }
+
+  const sigs = registry.order.map((sig) => {
+    const fields = signatureFields(sig);
+    return { sig, fields, tag: registry.tags[sig], ownedSomewhere: fields.some((f) => rowKeys.has(f)) };
+  });
+  const blankRows: Record<string, number> = {};
+
+  const walk = (rows: LinkedRow[], ancestors: Record<string, PrintDataValue>[]) => {
+    const top = ancestors[0];
+    for (const row of rows) {
+      // 作用域 = 顶层数据 + 各级外层行 + 当前行（靠后覆盖靠前）
+      const scope = Object.assign({}, ...ancestors, row) as Record<string, PrintDataValue>;
+      for (const s of sigs) {
+        const value = merge.resolve(s.sig, s.fields, scope);
+        row[s.tag] = value;
+        // 取不到值诊断（只统计真正会渲染成明细的那些行）：
+        //   - 行内自带这些字段 → 算不出值就是这一行的问题，计入
+        //   - 行内完全没有、顶层也没有 → 字段名对不上，计入
+        //   - 纯粹由顶层数据取值（字段都在顶层）→ 不在行计数里重复报，避免噪音
+        if (merge.warn && value === '') {
+          const ownsAny = s.fields.some((f) => Object.prototype.hasOwnProperty.call(row, f));
+          const fromTop = s.fields.every((f) => Object.prototype.hasOwnProperty.call(top, f));
+          if (ownsAny || (!fromTop && !s.ownedSomewhere)) {
+            blankRows[s.sig] = (blankRows[s.sig] || 0) + 1;
+          }
+        }
+      }
+      for (const key of Object.keys(row)) {
+        const v = row[key];
+        if (Array.isArray(v)) walk(v as unknown as LinkedRow[], [...ancestors, row]);
+      }
+    }
+  };
+
+  for (const key of Object.keys(payload)) {
+    const v = payload[key];
+    if (Array.isArray(v)) walk(v as unknown as LinkedRow[], [payload]);
+  }
+
+  if (merge.warn) {
+    for (const [sig, count] of Object.entries(blankRows)) {
+      const fields = signatureFields(sig);
+      merge.warn(
+        `合并字段「{{${fields.join('}{')}}}」有 ${count} 行取不到值（${fields.join('、')} 为空或算不出数值），` +
+        '这些行按规则输出为空；若希望像其它列一样显示兜底值（如 <10），' +
+        '请在「🔗 合并字段」面板末尾添加一个「其他情况」兜底分支，输出方式选「固定文本」'
+      );
+    }
+  }
 }
 
 // ============ 供 UI 使用 ============
 
-// 补全规则的缺省部分（读取旧配置 / 新建规则时统一走这里）
-export function normalizeMergeRule(rule: MergeRule | undefined): MergeRule {
+// 补全输出设置的缺省部分
+export function normalizeMergeOutput(out: MergeOutput | undefined): MergeOutput {
   return {
-    join: rule?.join === 'or' ? 'or' : 'and',
-    conditions: (rule?.conditions || []).map((c) => ({
+    mode: out?.mode || 'concat',
+    separator: out?.separator ?? '',
+    mantissaField: out?.mantissaField || '',
+    exponentField: out?.exponentField || '',
+    superscript: out?.superscript !== false,
+    times: out?.times || '×10',
+    precision: typeof out?.precision === 'number' ? out.precision : null,
+    text: out?.text ?? '',
+    fallback: out?.fallback ?? '',
+  };
+}
+
+// 补全单个分支的缺省部分
+export function normalizeMergeBranch(branch: MergeBranch | undefined): MergeBranch {
+  return {
+    join: branch?.join === 'or' ? 'or' : 'and',
+    conditions: (branch?.conditions || []).map((c) => ({
       field: c.field || '',
       op: c.op || 'eq',
       value: c.value ?? '',
     })),
-    output: {
-      mode: rule?.output?.mode || DEFAULT_MERGE_RULE.output.mode,
-      separator: rule?.output?.separator ?? '',
-      mantissaField: rule?.output?.mantissaField || '',
-      exponentField: rule?.output?.exponentField || '',
-      superscript: rule?.output?.superscript !== false,
-      times: rule?.output?.times || '×10',
-      precision: typeof rule?.output?.precision === 'number' ? rule.output.precision : null,
-      fallback: rule?.output?.fallback ?? '',
-    },
+    output: normalizeMergeOutput(branch?.output),
   };
+}
+
+// 新建分支（UI「添加分支」用）
+export function createMergeBranch(): MergeBranch {
+  return normalizeMergeBranch(DEFAULT_MERGE_BRANCH);
+}
+
+// 补全规则的缺省部分（读取旧配置 / 新建规则时统一走这里）。
+// 旧版单分支配置会被 toBranches 迁移成多分支，存量规则行为不变。
+export function normalizeMergeRule(rule: RawMergeRule | undefined): MergeRule {
+  const branches = toBranches(rule).map(normalizeMergeBranch);
+  return { branches: branches.length ? branches : [createMergeBranch()] };
 }
 
 const OP_SIGN: Record<MergeCondOp, string> = {
   eq: '=', ne: '≠', gt: '>', gte: '≥', lt: '<', lte: '≤', contains: '包含', notEmpty: '非空',
 };
 
-// 规则的文字描述（界面提示用，不取值）
-export function describeMergeRule(rule: MergeRule | undefined, fields: string[]): string {
-  if (!rule) return '';
-  const conds = (rule.conditions || []).filter((c) => c.field);
-  const condText = conds
+const BRANCH_MARKS = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩'];
+
+// 一种输出设置的文字描述
+function describeOutput(out: MergeOutput | undefined, fields: string[]): string {
+  const mode = out?.mode ?? 'concat';
+  if (mode === 'text') return `固定文本「${out?.text || ''}」`;
+  if (mode === 'concat') return `直接拼接${out?.separator ? `（连接符「${out.separator}」）` : ''}`;
+  const mantissa = out?.mantissaField || fields[0] || '尾数';
+  const exponent = out?.exponentField || fields[1] || fields[0] || '指数';
+  const tail = `（${mantissa} × 10 的 ${exponent} 次方）`;
+  return mode === 'product' ? `数值乘积${tail}` : `科学计数法${tail}`;
+}
+
+// 一组条件的文字描述（无条件返回空串）
+function describeConditions(branch: MergeBranch): string {
+  const conds = (branch.conditions || []).filter((c) => c.field);
+  return conds
     .map((c) => (c.op === 'notEmpty' ? `${c.field}非空` : `${c.field} ${OP_SIGN[c.op] || '='} ${c.value ?? ''}`))
-    .join(rule.join === 'or' ? ' 或 ' : ' 且 ');
+    .join(branch.join === 'or' ? ' 或 ' : ' 且 ');
+}
 
-  const out = rule.output;
-  const mantissa = out.mantissaField || fields[0] || '尾数';
-  const exponent = out.exponentField || fields[1] || fields[0] || '指数';
-  const outText = out.mode === 'concat'
-    ? `直接拼接${out.separator ? `（连接符「${out.separator}」）` : ''}`
-    : out.mode === 'product'
-      ? `数值乘积（${mantissa} × 10 的 ${exponent} 次方）`
-      : `科学计数法（${mantissa} × 10 的 ${exponent} 次方）`;
+// 规则的文字描述（界面提示用，不取值）。单分支保持旧格式，多分支用 ①②③ 逐支罗列。
+export function describeMergeRule(rule: RawMergeRule | MergeRule | undefined, fields: string[]): string {
+  const branches = toBranches(rule);
+  if (!branches.length) return '';
 
-  return condText ? `${condText} → ${outText}` : outText;
+  const describeOne = (b: MergeBranch) => {
+    const condText = describeConditions(b);
+    return `${condText ? `${condText} → ` : '其他情况 → '}${describeOutput(b.output, fields)}`;
+  };
+
+  if (branches.length === 1) return describeOne(branches[0]);
+  return branches.map((b, i) => `${BRANCH_MARKS[i] || `${i + 1}.`}${describeOne(b)}`).join('；');
 }

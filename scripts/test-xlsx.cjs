@@ -26,14 +26,36 @@ function loadEngine() {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2019 },
     }).outputText;
   };
-  // 先编译依赖 money，再编译 xlsxFill；用一个 require 解析 './money' 到已编译产物
+  // 先编译依赖 types / money / mergeField，再编译 xlsxFill；
+  // 用自定义 require 把子模块解析到已编译产物
+  const typesMod = { exports: {} };
+  new Function('module', 'exports', 'require', compile('types.ts'))(typesMod, typesMod.exports, require);
+
   const moneyMod = { exports: {} };
   new Function('module', 'exports', 'require', compile('services/money.ts'))(moneyMod, moneyMod.exports, require);
+
+  const mergeFieldMod = { exports: {} };
+  new Function('module', 'exports', 'require', compile('services/mergeField.ts'))(
+    mergeFieldMod, mergeFieldMod.exports, (id) => {
+      if (id === './money') return moneyMod.exports;
+      if (id === '../types') return typesMod.exports;
+      return require(id);
+    }
+  );
+
+  // xlsxFill 新增依赖：@@PAGE 分页指令解析（与 docxFill 共用）
+  const pageDirectiveMod = { exports: {} };
+  new Function('module', 'exports', 'require', compile('services/pageDirective.ts'))(
+    pageDirectiveMod, pageDirectiveMod.exports, require
+  );
 
   const m = { exports: {} };
   const req = (id) => {
     if (id === 'pizzip') return PizZip;
     if (id === './money') return moneyMod.exports;
+    if (id === './mergeField') return mergeFieldMod.exports;
+    if (id === './pageDirective') return pageDirectiveMod.exports;
+    if (id === '../types') return typesMod.exports;
     return require(id);
   };
   new Function('module', 'exports', 'require', compile('services/xlsxFill.ts'))(m, m.exports, req);

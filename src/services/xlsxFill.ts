@@ -1,18 +1,19 @@
 import PizZip from 'pizzip';
 import type { PrintDataValue, LinkedRow, MergeBindOptions } from '../types';
-import { rewriteMergeXml, signatureFields } from './mergeField';
+import { rewriteMergeXml, signatureFields, attachMergeTagsToRows } from './mergeField';
 import { amountToChinese } from './money';
+import { parsePageDirective, DEFAULT_PAGE_SIZE } from './pageDirective';
 
 const MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-const DETAIL_ROWS_PER_PAGE = 5;
 
 // ============================================================================
 // 轻量 xlsx 模板填充引擎
 // ----------------------------------------------------------------------------
-// docxtemplater 的 xlsx 模块是付费的，这里针对「货单」这类结构自研一个：
+// docxtemplater 的 xlsx 模块是付费的，这里针对「货单 / 记录单」这类结构自研一个：
 //   - 普通占位符  {字段名}         → 直接替换单元格文本
 //   - 明细循环    {#字段}…{/字段}  → 该字段值为数组，把「含循环标记的整行」按数据条数复制
-//   - 自动求和    {合计数量}/{合计金额} 等 → 见 SUM_MAP 约定或显式传入
+//   - 自动求和    {合计数量}/{合计金额} 等 → 见 computeAutoSums 约定
+//   - 分页指令    @@PAGE field=… size=N @@ → 每页明细行数上限；指令单元格不打印
 //
 // 实现策略：把所有共享字符串(sharedStrings)内联进 worksheet，再对 sheet XML 做
 // 纯文本占位符替换 + 循环行克隆 + 行号/合并单元格重排。这样避免共享字符串索引维护。
@@ -88,6 +89,44 @@ export function findLoopField(sheetXml: string): string | null {
   return m ? m[1].trim() : null;
 }
 
+// 找出 @@PAGE 指令所在的单元格，解析出每页明细行数，并让指令行不参与打印。
+//   - 专用指令行（整行只有这一个单元格）且位于末尾 → 整行删除，不留空行占用页高；
+//   - 其他情况 → 只清空文本、保留行与样式（删行会让后续行号与合并区域整体错位）。
+function extractPageDirective(sheetXml: string): { xml: string; rowsPerPage: number } {
+  const cellRe = /<c\b[^>]*t="inlineStr"[^>]*>\s*<is>([\s\S]*?)<\/is>\s*<\/c>/g;
+  let m: RegExpExecArray | null;
+  while ((m = cellRe.exec(sheetXml))) {
+    const runs = m[1].match(/<t[^>]*>([\s\S]*?)<\/t>/g) || [];
+    const text = unescapeXml(runs.map((r) => r.replace(/<t[^>]*>([\s\S]*?)<\/t>/, '$1')).join(''));
+    const rule = parsePageDirective(text);
+    if (!rule) continue;
+
+    const rowStart = sheetXml.lastIndexOf('<row ', m.index);
+    const rowClose = sheetXml.indexOf('</row>', m.index);
+    const rowEnd = rowClose < 0 ? m.index + m[0].length : rowClose + '</row>'.length;
+    const rowXml = rowStart >= 0 ? sheetXml.slice(rowStart, rowEnd) : '';
+    const rowNum = (rowXml.match(/<row r="(\d+)"/) || [])[1];
+    // 该行不能被合并单元格引用，否则删行会留下悬空引用。
+    // 注意必须只在 <mergeCells> 段内匹配：否则会误命中 <dimension ref="A1:G25"/>。
+    const mergeSection = sheetXml.match(/<mergeCells[\s\S]*?<\/mergeCells>/);
+    const mergedRef = !rowNum || (!!mergeSection &&
+      new RegExp(`ref="[A-Z]+${rowNum}:[A-Z]+\\d+"|ref="[A-Z]+\\d+:[A-Z]+${rowNum}"`).test(mergeSection[0]));
+    const onlyCell = (rowXml.match(/<c\b/g) || []).length <= 1;
+    const isLastRow = rowStart >= 0 && !/<row\b/.test(sheetXml.slice(rowEnd));
+
+    if (rowStart >= 0 && onlyCell && isLastRow && !mergedRef) {
+      return { xml: sheetXml.slice(0, rowStart) + sheetXml.slice(rowEnd), rowsPerPage: rule.size };
+    }
+    const openTag = m[0].slice(0, m[0].indexOf('>') + 1);
+    const cleared = `${openTag}<is><t xml:space="preserve"></t></is></c>`;
+    return {
+      xml: sheetXml.slice(0, m.index) + cleared + sheetXml.slice(m.index + m[0].length),
+      rowsPerPage: rule.size,
+    };
+  }
+  return { xml: sheetXml, rowsPerPage: DEFAULT_PAGE_SIZE };
+}
+
 interface RowInfo { r: number; xml: string; start: number; end: number; }
 
 // 按 <row r="N"> 拆出所有行
@@ -145,9 +184,13 @@ function computeAutoSums(rows: LinkedRow[]): Record<string, string> {
   };
 }
 
+// 明细区高度 = 模板中「循环行 → 合计行」占用的行数。
+// 若模板里没有合计行，回退为 1 —— 只把循环行本身当作明细行。
+// ⚠️ 旧实现回退为 5，会把它当成「明细区有 5 行」，于是循环行之后的 4 行真实模板内容
+//    （如「小试工艺描述」「实验现象」「稳定性试验」等固定区块）被整行丢弃，打印时消失。
 function pageCapacity(rows: RowInfo[], loopRow: number): number {
   const footer = rows.find((r) => r.r > loopRow && /\{(?:合计数量|合计金额)\}|合计/.test(r.xml));
-  return Math.max(1, (footer ? footer.r : loopRow + 5) - loopRow);
+  return Math.max(1, (footer ? footer.r : loopRow + 1) - loopRow);
 }
 
 function shiftRowXml(rowXml: string, offset: number): string {
@@ -156,13 +199,13 @@ function shiftRowXml(rowXml: string, offset: number): string {
     .replace(/(<c r="[A-Z]+)(\d+)(")/g, (_a, p, r, s) => `${p}${parseInt(r, 10) + offset}${s}`);
 }
 
+// 按「每页实际输出多少明细行 + 该页在输出中的起始偏移」重排合并单元格。
+// 各页行数可能不同（不再补空白行），因此每页单独用 offsets[i] 定位。
 function repeatPageMerges(
   sheetXml: string,
   loopRow: number,
   templateCapacity: number,
-  targetCapacity: number,
-  pageCount: number,
-  pageHeight: number
+  pages: { detailCount: number; offset: number }[]
 ): string {
   return sheetXml.replace(/<mergeCells\b([^>]*)>([\s\S]*?)<\/mergeCells>/, (_all, attrs, inner) => {
     const base: Array<{ c1: string; r1: number; c2: string; r2: number }> = [];
@@ -170,12 +213,13 @@ function repeatPageMerges(
       (_m: string, c1: string, r1: string, c2: string, r2: string) => { base.push({ c1, r1: +r1, c2, r2: +r2 }); return _m; });
     const refs = new Set<string>();
     const footerRow = loopRow + templateCapacity;
-    const detailDelta = targetCapacity - templateCapacity;
-    for (let p = 0; p < pageCount; p++) {
-      const off = p * pageHeight;
+    for (const pg of pages) {
+      const off = pg.offset;
+      const detailDelta = pg.detailCount - templateCapacity;
       for (const m of base) {
         if (m.r1 === loopRow && m.r2 === loopRow) {
-          for (let i = 0; i < targetCapacity; i++) refs.add(`${m.c1}${loopRow + off + i}:${m.c2}${loopRow + off + i}`);
+          // 循环行自身的合并区：按本页实际明细行数逐行复制
+          for (let i = 0; i < pg.detailCount; i++) refs.add(`${m.c1}${loopRow + off + i}:${m.c2}${loopRow + off + i}`);
         } else if (m.r1 >= loopRow && m.r2 < footerRow) {
           continue;
         } else {
@@ -224,6 +268,11 @@ export function fillXlsx(
   // 1) 内联共享字符串，占位符进入 sheet
   sheetXml = inlineSharedStrings(sheetXml, strings);
 
+  // 1.5) 解析 @@PAGE 指令并清空指令单元格（指令不打印）；未写则用默认每页行数
+  const dirInfo = extractPageDirective(sheetXml);
+  sheetXml = dirInfo.xml;
+  const rowsPerPage = dirInfo.rowsPerPage;
+
   // 2) 合并字段（复合占位符）：重写为规整标签并补进数据
   let payload = data;
   if (merge) {
@@ -236,6 +285,8 @@ export function fillXlsx(
         if (payload[tag] == null) extra[tag] = merge.resolve(signature, signatureFields(signature));
       }
       payload = { ...data, ...extra };
+      // 明细行内的合并字段：标签取值同样下沉到每一行（xlsx 目前只支持一层循环）
+      attachMergeTagsToRows(payload, { tags: rw.tags, order: rw.order }, merge);
     }
   }
 
@@ -254,18 +305,24 @@ export function fillXlsx(
         const dataRows = rows.length > 0 ? rows : [];
         const n = dataRows.length;
         const templateCapacity = pageCapacity(allRows, loopRow.r);
-        const detailDelta = DETAIL_ROWS_PER_PAGE - templateCapacity;
-        const pageHeight = allRows[allRows.length - 1].r + detailDelta;
-        const pageCount = Math.max(1, Math.ceil(n / DETAIL_ROWS_PER_PAGE));
+        const pageCount = Math.max(1, Math.ceil(n / rowsPerPage));
         const before = allRows.filter((r) => r.r < loopRow.r);
         const after = allRows.filter((r) => r.r >= loopRow.r + templateCapacity);
+        const lastTplRow = allRows[allRows.length - 1].r;
         const pages: string[] = [];
+        // 每页实际输出的明细行数 + 该页在输出中的起始偏移。
+        // size 是「每页行数上限」而非固定行数：有多少条数据就输出多少行，不补空白行。
+        // 各页行数可能不同，因此偏移量按页累计（而不是固定 pageHeight × 页号）。
+        const pageInfos: { detailCount: number; offset: number }[] = [];
+        const breakRows: number[] = [];
+        let offset = 0;
         for (let p = 0; p < pageCount; p++) {
-          const chunk = dataRows.slice(p * DETAIL_ROWS_PER_PAGE, (p + 1) * DETAIL_ROWS_PER_PAGE);
-          const pageRows: string[] = [];
-          for (let i = 0; i < DETAIL_ROWS_PER_PAGE; i++) {
-            pageRows.push(renumberRow(fillLoopRow(loopRow.xml, chunk[i] || {}), loopRow.r, loopRow.r + i));
-          }
+          const chunk = dataRows.slice(p * rowsPerPage, (p + 1) * rowsPerPage);
+          const detailCount = Math.max(1, chunk.length); // 至少保留 1 行，避免表格塌陷
+          const detailDelta = detailCount - templateCapacity;
+          const pageRows = chunk.map((row, i) =>
+            renumberRow(fillLoopRow(loopRow.xml, row), loopRow.r, loopRow.r + i)
+          );
           const pageAfter = after.map((r) => renumberRow(r.xml, r.r, r.r + detailDelta));
           const pageSums = computeAutoSums(chunk);
           const pageData: Record<string, PrintDataValue> = {
@@ -275,16 +332,18 @@ export function fillXlsx(
             金额大写: amountToChinese(pageSums.合计金额),
           };
           const pageXml = [...before.map((r) => r.xml), ...pageRows, ...pageAfter]
-            .map((xml) => shiftRowXml(xml, p * pageHeight)).join('');
+            .map((xml) => shiftRowXml(xml, offset)).join('');
           pages.push(fillScalars(pageXml, pageData));
+
+          pageInfos.push({ detailCount, offset });
+          offset += lastTplRow + detailDelta; // 本页占用的总行数
+          if (p < pageCount - 1) breakRows.push(offset);
         }
         sheetXml = sheetXml.replace(/<sheetData>[\s\S]*?<\/sheetData>/, `<sheetData>${pages.join('')}</sheetData>`);
-        sheetXml = repeatPageMerges(
-          sheetXml, loopRowNum, templateCapacity, DETAIL_ROWS_PER_PAGE, pageCount, pageHeight
-        );
+        sheetXml = repeatPageMerges(sheetXml, loopRowNum, templateCapacity, pageInfos);
         const dimension = sheetXml.match(/<dimension\b[^>]*ref="[A-Z]+\d+:([A-Z]+)\d+"/);
-        sheetXml = setDimension(sheetXml, dimension?.[1] || 'J', pageHeight * pageCount);
-        sheetXml = setRowBreaks(sheetXml, Array.from({ length: pageCount - 1 }, (_, i) => pageHeight * (i + 1)));
+        sheetXml = setDimension(sheetXml, dimension?.[1] || 'J', offset);
+        sheetXml = setRowBreaks(sheetXml, breakRows);
 
         const sums = computeAutoSums(dataRows);
         const extra: Record<string, PrintDataValue> = {};

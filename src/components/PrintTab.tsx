@@ -2,27 +2,30 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Checkbox, Input, Select, Slider, Space, Spin, Switch, Tag, Tooltip, Typography, message } from 'antd';
 import {
   PrinterOutlined, DownloadOutlined, ReloadOutlined, RotateRightOutlined,
-  ZoomInOutlined, ZoomOutOutlined, ColumnWidthOutlined,
+  ZoomInOutlined, ZoomOutOutlined, ColumnWidthOutlined, CloudUploadOutlined,
 } from '@ant-design/icons';
 import { saveAs } from 'file-saver';
 
-import type { TemplateInfo, MatchConfig, MatchKind, StampConfig, StampInfo, StampPageSetting, MergeHit } from '../types';
+import type { TemplateInfo, MatchConfig, MatchKind, StampConfig, StampInfo, StampPageSetting, MergeHit, AttachSizeConfig } from '../types';
 import { DEFAULT_STAMP_CONFIG, STAMP_POSITION_LABEL } from '../types';
 import type { ActiveRecordState } from '../hooks/useActiveRecord';
-import { fetchTemplateBuffer } from '../services/templateApi';
+import { fetchTemplateBuffer, putConfig } from '../services/templateApi';
 import { listStamps, fetchStampBuffer, fetchStampBase64, stampUrl } from '../services/stampApi';
 import { buildPrintData } from '../services/dataBuilder';
 import { fillTemplate, explainDocxError } from '../services/docxFill';
 import { fillXlsx, isXlsxName } from '../services/xlsxFill';
-import { detectTemplateMerges } from '../services/mergeDetect';
+import { detectTemplateMerges, detectTemplateLoops } from '../services/mergeDetect';
 import { makeMergeResolver } from '../services/mergeField';
+import { buildAttachmentBind, isImageAttachment } from '../services/attachmentImages';
 import MergeFieldModal, { MergeFieldRuleButton } from './MergeFieldSetting';
+import AttachmentImageSetting from './AttachmentImageSetting';
 import { stampDocxBlob, arrayBufferToBase64 } from '../services/docxStamp';
 import type { OverlayStamp, PageOverlayResult } from '../services/stampOverlay';
 import { resolveAutoSelection } from '../services/templateMatch';
 import { checkPrintAllowed } from '../services/printCheck';
 import { buildDownloadName, defaultBaseName } from '../services/downloadName';
 import DownloadNameModal, { DownloadNameEntryButton } from './DownloadNameSetting';
+import PushCloudModal, { type PreparedFile } from './PushCloudModal';
 import { createRequestGate } from '../services/requestGate';
 import { currentPreviewBlob } from '../services/previewBlob';
 import {
@@ -73,6 +76,7 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
   const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
   const [previewTemplateName, setPreviewTemplateName] = useState<string | null>(null);
   const [nameModalOpen, setNameModalOpen] = useState(false);
+  const [pushModalOpen, setPushModalOpen] = useState(false);
   const [orientation, setOrientation] = useState<PrintOrientation>('auto');
   const [multiCopy, setMultiCopy] = useState(false);
   const DEFAULT_COPIES = ['生产部', '销售部', '客户', '财务部', '开票'];
@@ -107,6 +111,14 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
   const [mergePanelOpen, setMergePanelOpen] = useState(false);
   const [mergeEditing, setMergeEditing] = useState<MergeHit | null>(null);
   const mergeRules = active.tableId ? matchConfig.mergeFields?.[active.tableId] : undefined;
+
+  // ===== 附件图片 =====
+  const [attachPanelOpen, setAttachPanelOpen] = useState(false);
+  // 本表的附件字段（FieldType.Attachment = 17），用于图片宽度设置
+  const attachmentFields = useMemo(
+    () => active.fieldMetas.filter((f) => f.type === 17).map((f) => f.name),
+    [active.fieldMetas]
+  );
 
   // 选中模板后检测其中的复合占位符（供面板展示；填充时以实际取到的模板字节为准再检测一次）
   useEffect(() => {
@@ -296,25 +308,48 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
     setWarnings([]);
     try {
       const buffer = await fetchTemplateBuffer(active.tableId, selected);
-      const { data, warnings: w } = await buildPrintData(
-        active.table, active.tableName, active.fieldMetas, active.recordId
+      const isX = isXlsxName(selected);
+      // 先扫模板里被用作循环的字段（{#字段}），数据层据此把嵌套关联字段展开成数组，
+      // 从而支持两层嵌套循环；模板没写成循环的嵌套关联字段仍按汇总文本输出。
+      // xlsx 引擎目前只支持一层明细循环，故不传（保持既有行为）。
+      const loopFields = isX ? [] : detectTemplateLoops(buffer, selected);
+      const { data, warnings: w, attachments } = await buildPrintData(
+        active.table, active.tableName, active.fieldMetas, active.recordId, { loopFields }
       );
+
+      // 附件图片：把图片类附件下载为 base64，渲染时按设置宽度插入 {字段名} 位置。
+      // 非图片附件不处理，保持 docxtemplater 输出的文件名文本。
+      const attachSizeCfg = matchConfig.attachmentImages?.[active.tableId];
+      let attachBind;
+      if (isX) {
+        if (attachments) {
+          const hasImage = Object.values(attachments).some((a) => a.items.some(isImageAttachment));
+          if (hasImage) w.push('Excel 模板暂不支持图片附件，该字段已按文件名输出');
+        }
+      } else {
+        const attachResult = await buildAttachmentBind(active.table, active.recordId, attachments, attachSizeCfg);
+        attachBind = attachResult.bind;
+        // 降级原因（取地址失败/下载失败/格式不支持）透出到预览区，避免静默只看到文件名
+        w.push(...attachResult.warnings);
+      }
 
       // 合并字段：先检测模板里的复合占位符，按已保存规则算出各签名输出值再填充。
       // 条件字段可引用本表任意字段，取值口径与模板占位符完全一致（都用显示字符串）。
+      // scope 为循环内当前行（含父级回退）；顶层取值时 scope 为空，回落到整条记录的数据。
       const hits = detectTemplateMerges(buffer, selected);
       if (isCurrent()) setMergeHits(hits);
       const mergeOpts = hits.length > 0
         ? {
-            resolve: makeMergeResolver(mergeRules, (field: string) => {
-              const v = data[field];
+            resolve: makeMergeResolver(mergeRules, (field: string, scope) => {
+              const v = scope && scope[field] != null ? scope[field] : data[field];
               return v == null || Array.isArray(v) ? '' : String(v);
             }),
+            // 循环内某行引用的字段为空、算不出值时，别默默留白 —— 在预览区给出原因与改法
+            warn: (msg: string) => w.push(msg),
           }
         : undefined;
 
-      const isX = isXlsxName(selected);
-      const blob = isX ? fillXlsx(buffer, data, mergeOpts) : fillTemplate(buffer, data, mergeOpts);
+      const blob = isX ? fillXlsx(buffer, data, mergeOpts) : fillTemplate(buffer, data, mergeOpts, attachBind);
 
       // 电子盖章：预览/打印走 JS 叠加（干净 blob，docx-preview 渲染后盖 img）；
       // 下载时再另行把印章以浮动图片注入 docx（posOffset，Word 语义正确）
@@ -350,7 +385,7 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
     } finally {
       if (isCurrent()) setRendering(false);
     }
-  }, [selected, active.tableId, active.table, active.recordId, active.tableName, active.fieldMetas, stamps, mergeRules]);
+  }, [selected, active.tableId, active.table, active.recordId, active.tableName, active.fieldMetas, stamps, mergeRules, matchConfig.attachmentImages]);
 
   useEffect(() => {
     generationGateRef.current.invalidate();
@@ -466,11 +501,14 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
     }
   };
 
-  const handleDownload = async () => {
+  // 产出「下载 / 推送云盘」共用的文档与文件名：
+  // 同一条链路（预览 blob → 可选印章注入 → 按表命名规则拼名），确保推送到云盘的
+  // 与本地下载的是同一份内容和同一个文件名。
+  const buildExport = useCallback(async (): Promise<PreparedFile | null> => {
     const clean = safePreviewBlob || (await generate());
-    if (!clean) return;
+    if (!clean) return null;
     let blob = clean;
-    // Word 模板 + 已选印章：下载时把印章以浮动图片注入 docx（Word 打开即带章）
+    // Word 模板 + 已选印章：导出时把印章以浮动图片注入 docx（Word 打开即带章）
     if (!isXlsx) {
       const cfg = stampConfigRef.current;
       const pick = cfg.stamps.filter((n) => stamps.some((s) => s.name === n));
@@ -484,7 +522,7 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
           );
           blob = await stampDocxBlob(clean, imgs, cfg);
         } catch (se: any) {
-          message.warning('盖章失败，已下载未盖章版本：' + (se?.message || se));
+          message.warning('盖章失败，已使用未盖章版本：' + (se?.message || se));
         }
       }
     }
@@ -506,14 +544,38 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
     } catch (e) {
       fileName = defaultBaseName(selected || '打印.docx', active.primaryText);
     }
-    saveAs(blob, `${fileName}${ext}`);
+    return { blob, fileName: `${fileName}${ext}` };
+  }, [
+    safePreviewBlob, generate, isXlsx, stamps, active.tableId, active.table,
+    active.fieldMetas, active.tableName, active.recordId, active.primaryText,
+    matchConfig.downloadNames, selected,
+  ]);
+
+  const handleDownload = async () => {
+    const out = await buildExport();
+    if (!out) return;
+    saveAs(out.blob, out.fileName);
   };
+
+  // 供「推送云文档」弹窗调用（弹窗内部触发时才生成，避免无谓计算）
+  const preparePush = useCallback(() => buildExport(), [buildExport]);
+
+  // 附件图片宽度设置：按表写入 _config.json（保存结果回写父级 matchConfig）
+  const handleAttachSizeChange = useCallback((next: Record<string, AttachSizeConfig>) => {
+    if (!active.tableId) return;
+    const cfg: MatchConfig = {
+      ...matchConfig,
+      attachmentImages: { ...(matchConfig.attachmentImages || {}), [active.tableId]: next },
+    };
+    putConfig(cfg)
+      .then((saved) => onConfigChanged(saved))
+      .catch(() => message.error('附件图片设置保存失败'));
+  }, [active.tableId, matchConfig, onConfigChanged]);
 
   const templateOptions = useMemo(
     () => templates.map((t) => ({ label: t.name, value: t.name })),
     [templates]
   );
-
   const noRecord = !active.recordId;
 
   return (
@@ -711,6 +773,17 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
           )}
         </div>
 
+        {/* 附件图片（宽度设置）面板 */}
+        {attachmentFields.length > 0 && (
+          <AttachmentImageSetting
+            fields={attachmentFields}
+            config={active.tableId ? matchConfig.attachmentImages?.[active.tableId] : undefined}
+            onChange={handleAttachSizeChange}
+            open={attachPanelOpen}
+            onToggle={() => setAttachPanelOpen((v) => !v)}
+          />
+        )}
+
         {/* 合并字段（复合占位符）面板 */}
         {selected && (
           <div style={{ background: '#fff', borderRadius: 10, boxShadow: '0 1px 4px rgba(31,35,41,.06)', padding: '0 12px', flexShrink: 0 }}>
@@ -852,10 +925,11 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
       </div>
 
       {/* 底部固定操作栏 */}
-      <div style={{ background: '#fff', borderTop: '1px solid #e5e6eb', padding: '10px 16px', display: 'flex', gap: 10, flexShrink: 0 }}>
+      {/* flexWrap：侧边栏较窄时「推送云文档」自动落到第二行独占一行，不挤坏打印/下载 */}
+      <div style={{ background: '#fff', borderTop: '1px solid #e5e6eb', padding: '10px 16px', display: 'flex', flexWrap: 'wrap', gap: 10, flexShrink: 0 }}>
         <Button
           type="primary"
-          style={{ flex: 1, height: 38, borderRadius: 8, fontSize: 14, fontWeight: 500 }}
+          style={{ flex: 1, minWidth: 108, height: 38, borderRadius: 8, fontSize: 14, fontWeight: 500 }}
           onClick={handlePrint}
           loading={printing}
           disabled={printing || !selected || noRecord || (checkActive && !printCheck.passed)}
@@ -868,7 +942,7 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
             : '打印'}
         </Button>
         <Button
-          style={{ flex: 1, height: 38, borderRadius: 8, border: '1px solid #e5e6eb', fontSize: 14, fontWeight: 500 }}
+          style={{ flex: 1, minWidth: 92, height: 38, borderRadius: 8, border: '1px solid #e5e6eb', fontSize: 14, fontWeight: 500 }}
           onClick={handleDownload}
           disabled={!selected || noRecord}
         >
@@ -881,7 +955,20 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
           onClick={() => setNameModalOpen(true)}
           disabled={!active.tableId}
         />
+        <Button
+          style={{ flex: 1, minWidth: 130, height: 38, borderRadius: 8, border: '1px solid #e5e6eb', fontSize: 14, fontWeight: 500 }}
+          onClick={() => setPushModalOpen(true)}
+          disabled={!selected || noRecord}
+        >
+          <CloudUploadOutlined /> 推送云文档
+        </Button>
       </div>
+
+      <PushCloudModal
+        open={pushModalOpen}
+        onClose={() => setPushModalOpen(false)}
+        prepare={preparePush}
+      />
 
       <DownloadNameModal
         open={nameModalOpen}

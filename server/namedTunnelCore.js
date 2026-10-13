@@ -25,6 +25,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const os = require('os');
+const net = require('net');
 const { spawn, execFileSync } = require('child_process');
 
 const tun = require('./tunnelCore');
@@ -43,6 +44,27 @@ const DEFAULT_PROFILE = 'default';
 const METRICS_PORT_BASE = 20241;
 
 const CLOUDFLARED_DL = 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe';
+
+/**
+ * cloudflared 下载地址候选表（按顺序尝试，第一个成功即用）。
+ *
+ * 为什么需要这么一张表：GitHub Releases 的下载会 302 到
+ * objects.githubusercontent.com，部分网络下这一步直接 ETIMEDOUT/502，
+ * 于是「一键部署」在第一步就断掉（曾在本机实际发生）。镜像走同一份
+ * GitHub 发布产物，Content-Length 与原站一致，可做完整性校验。
+ *
+ * 可用环境变量 CLOUDFLARED_DL_URL 覆盖（内网自建镜像 / 离线分发用）。
+ */
+function cloudflaredDownloadUrls() {
+  const override = String(process.env.CLOUDFLARED_DL_URL || '').trim();
+  if (override) return [override];
+  return [
+    CLOUDFLARED_DL,
+    'https://gh-proxy.com/' + CLOUDFLARED_DL,
+    'https://ghproxy.net/' + CLOUDFLARED_DL,
+    'https://ghfast.top/' + CLOUDFLARED_DL,
+  ];
+}
 
 /* ------------------------------------------------------------------ 小工具 */
 
@@ -365,13 +387,42 @@ async function ensureCloudflared(cfg, opts) {
 
   const dest = path.join(CF_DIR, 'cloudflared.exe');
   if (options.log) options.log('未检测到 cloudflared，正在下载（约 54MB，仅首次需要）…');
-  await download(CLOUDFLARED_DL, dest, {
-    onProgress: (got, total) => {
-      if (!options.log) return;
-      const mb = (n) => (n / 1048576).toFixed(1);
-      options.log(total ? `  下载中 ${mb(got)} / ${mb(total)} MB` : `  下载中 ${mb(got)} MB`);
-    },
-  });
+
+  const urls = cloudflaredDownloadUrls();
+  const failures = [];
+  let ok = false;
+  for (let i = 0; i < urls.length; i += 1) {
+    const url = urls[i];
+    if (options.log && i > 0) options.log('  直连失败，改用镜像 ' + i + '/' + (urls.length - 1) + '：' + url);
+    try {
+      await download(url, dest, {
+        onProgress: (got, total) => {
+          if (!options.log) return;
+          const mb = (n) => (n / 1048576).toFixed(1);
+          options.log(total ? `  下载中 ${mb(got)} / ${mb(total)} MB` : `  下载中 ${mb(got)} MB`);
+        },
+      });
+      ok = true;
+      break;
+    } catch (e) {
+      failures.push(url + ' -> ' + e.message);
+      if (options.log) options.log('  失败：' + e.message);
+    }
+  }
+
+  if (!ok) {
+    const err = new Error(
+      'cloudflared 下载失败，已试过 ' + failures.length + ' 个地址：\n  ' + failures.join('\n  ') +
+      '\n\n可手动解决（任选其一）：\n' +
+      '  1) 从能上网的电脑下载 cloudflared-windows-amd64.exe，改名为 cloudflared.exe，\n' +
+      '     放到：' + CF_DIR + '\n' +
+      '  2) 用参数指定可用镜像后重试：\n' +
+      '     set CLOUDFLARED_DL_URL=https://你的镜像/cloudflared-windows-amd64.exe\n' +
+      '     deploy.bat',
+    );
+    err.code = 'CLOUDFLARED_DOWNLOAD_FAILED';
+    throw err;
+  }
   if (fileSize(dest) < 10 * 1024 * 1024) {
     throw new Error('下载到的 cloudflared 体积异常（' + fileSize(dest) + ' 字节），请手动把 cloudflared.exe 放到 runtime/cloudflared/');
   }
@@ -565,6 +616,42 @@ async function waitTunnelReady(cfg, child, waitMs) {
   return readyStatus;
 }
 
+/**
+ * 等某个本地端口彻底释放。
+ * 旧隧道刚被 taskkill 掉的那几秒，监听端口可能还占着；此时启动 cloudflared 会
+ * 「bind 失败 → 立刻退出」，既白等一轮，又会被误判成「这种写法连不上边缘」。
+ */
+function waitPortFree(port, timeoutMs) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + Number(timeoutMs || 30000);
+    const tryOnce = () => {
+      const srv = net.createServer();
+      srv.once('error', () => {
+        if (Date.now() >= deadline) {
+          resolve(false);
+          return;
+        }
+        setTimeout(tryOnce, 500);
+      });
+      srv.once('listening', () => srv.close(() => resolve(true)));
+      srv.listen(port, '127.0.0.1');
+    };
+    tryOnce();
+  });
+}
+
+/**
+ * 用户级 config.yml 是否真的能撑起「兼容写法」（不带 --config 直接 run）。
+ * 必须同时满足：文件存在、有 ingress、且确实是本隧道/本域名。
+ * 非默认 profile 刻意不写用户级配置，此时降到兼容模式 = 隧道连上了但没有任何
+ * ingress 规则 → 公网所有请求 503（表现为插件页面白屏），必须避免。
+ */
+function hasUsableUserConfig(cfg) {
+  const txt = readText(cfg.userConfig);
+  if (!txt || txt.indexOf('ingress') === -1) return false;
+  return txt.indexOf(String(cfg.hostname || '')) !== -1 || txt.indexOf(String(cfg.tunnelName || '')) !== -1;
+}
+
 async function startNamedTunnel(cfg, opts) {
   const options = opts || {};
   const log = options.log || (() => {});
@@ -592,12 +679,21 @@ async function startNamedTunnel(cfg, opts) {
     '--metrics', '127.0.0.1:' + cfg.metricsPort,
     '--pidfile', cfg.pidFile,
   ];
-  // 先试项目内配置（换机器后不依赖任何全局状态）；万一 cloudflared 版本对
-  // `tunnel --config` 的位置敏感，再退回一直可用的兼容写法，保证不会把服务搞挂。
-  const plan = [
-    { label: '项目内配置', args: ['tunnel', '--config', cfg.runtimeConfig].concat(common, ['run', runArg]) },
-    { label: '兼容模式', args: ['tunnel'].concat(common, ['run', runArg]) },
-  ];
+  const projectArgs = ['tunnel', '--config', cfg.runtimeConfig].concat(common, ['run', runArg]);
+
+  // 先试项目内配置（换机器后不依赖任何全局状态）。
+  const plan = [{ label: '项目内配置', args: projectArgs }];
+
+  // 兼容写法不带任何 ingress，只有用户级 config.yml 真能用时才有意义；
+  // 否则会得到一条「连上了边缘但所有请求 503」的隧道（页面白屏），比降级更糟。
+  if (hasUsableUserConfig(cfg)) {
+    plan.push({ label: '兼容模式', args: ['tunnel'].concat(common, ['run', runArg]) });
+  } else {
+    log('用户级 config.yml 不可用，跳过兼容模式（避免得到一条没有 ingress 的隧道）');
+  }
+
+  // 项目内配置失败多半是端口没释放 / 时序问题，重试一次比降级可靠。
+  plan.push({ label: '项目内配置(重试)', args: projectArgs });
 
   const waitMs = Number(options.waitMs || 75000);
   let lastStatus = null;
@@ -605,6 +701,9 @@ async function startNamedTunnel(cfg, opts) {
 
   for (let i = 0; i < plan.length; i += 1) {
     const step = plan[i];
+    // 每次启动前都确认 metrics 端口已释放，否则 cloudflared 会 bind 失败秒退。
+    const freed = await waitPortFree(cfg.metricsPort, 30000);
+    if (!freed) log('注意：metrics 端口 ' + cfg.metricsPort + ' 仍被占用，仍尝试启动…');
     log('启动隧道（' + step.label + '）：' + path.basename(cf.path) + ' ' + step.args.join(' '));
     lastChild = spawnTunnel(cf.path, step.args, cfg);
     lastStatus = await waitTunnelReady(cfg, lastChild, waitMs);
@@ -616,7 +715,7 @@ async function startNamedTunnel(cfg, opts) {
     const alive = lastChild.pid ? [lastChild.pid] : [];
     tun.killPids(alive);
     await sleep(1500);
-    if (i < plan.length - 1) log('该写法未连上边缘（/ready=' + lastStatus + '），改用兼容模式重试…');
+    if (i < plan.length - 1) log('该写法未连上边缘（/ready=' + lastStatus + '），换下一种写法重试…');
   }
 
   const err = new Error('隧道启动后未能连上 Cloudflare 边缘（/ready=' + lastStatus + '）');

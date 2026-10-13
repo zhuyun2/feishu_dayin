@@ -26,6 +26,44 @@ export interface MatchConfig {
   downloadNames?: Record<string, DownloadNameConfig>;
   // 合并字段（复合占位符）输出规则：mergeFields[tableId][签名] = 规则
   mergeFields?: Record<string, MergeFieldConfig>;
+  // 附件图片输出尺寸：attachmentImages[tableId][字段名] = { widthCm }
+  attachmentImages?: AttachmentImageConfig;
+}
+
+// ============ 附件图片 ============
+// 附件字段（FieldType.Attachment=17）里若含图片，占位符 {字段名} 处插入图片（按宽度等比缩放）；
+// 非图片附件仍按原规则输出文件名文本。图片字节经服务端代理下载，避免浏览器跨域。
+
+// 表格单元里的一条附件（SDK IOpenAttachment 的最小子集）
+export interface RawAttachment {
+  name: string;
+  size: number;
+  type: string; // mime，如 image/png
+  token: string;
+}
+
+// 一个附件字段在本条记录下的解析结果（保持原始顺序）
+export interface AttachmentFieldData {
+  fieldId: string;
+  items: RawAttachment[];
+}
+
+// 单个附件字段的图片尺寸设置（按字段名保存；高度等比自动）
+export interface AttachSizeConfig {
+  widthCm: number;
+}
+
+// 某张表的全部附件字段尺寸：{ [字段名]: AttachSizeConfig }
+export type AttachmentImageConfig = Record<string, Record<string, AttachSizeConfig>>;
+
+// 注入到 docx 的一个片段：图片（inline）或文本（非图片附件的文件名）
+export type AttachImagePart =
+  | { kind: 'image'; base64: string; ext: 'png' | 'jpg'; w: number; h: number }
+  | { kind: 'text'; text: string };
+
+// 附件图片注入绑定：字段名 → 顺序化的片段 + 该字段图片宽度
+export interface AttachmentBindOptions {
+  byField: Record<string, { parts: AttachImagePart[]; widthCm: number }>;
 }
 
 // ============ 下载文件命名 ============
@@ -72,15 +110,28 @@ export interface FieldMetaLite {
 }
 
 // 关联字段展开后的一条子记录：{ 序号: 1, 子字段名: '值', ... }
-export type LinkedRow = Record<string, string | number>;
+// 子表内被模板用作循环的关联字段，其值为下一层子记录数组（支持两层循环）
+export type LinkedRowValue = string | number | LinkedRow[];
+export type LinkedRow = Record<string, LinkedRowValue>;
 
 // docxtemplater 填充数据：普通字段为字符串，关联字段为子记录数组
-export type PrintDataValue = string | number | LinkedRow[];
+export type PrintDataValue = LinkedRowValue;
+
+// buildPrintData 的选项
+export interface BuildPrintDataOptions {
+  // 模板里被用作循环的字段名（形如 {#字段}，含嵌套层）。
+  // 只有出现在这里的「子表内关联字段」才会被递归展开成数组（支持两层循环），
+  // 其余嵌套关联字段仍按汇总文本输出，避免无谓的接口调用与行为变化。
+  // 不传 = 保持旧行为（只展开一层）。
+  loopFields?: string[];
+}
 
 // buildPrintData 的产物
 export interface PrintDataResult {
   data: Record<string, PrintDataValue>;
   warnings: string[];
+  // 含图片附件的附件字段（字段名 → 原始附件列表）。无则 undefined。
+  attachments?: Record<string, AttachmentFieldData>;
 }
 
 // 模板匹配结果
@@ -155,7 +206,8 @@ export type MergeJoin = 'and' | 'or';
 export type MergeOutputMode =
   | 'concat'      // 直接拼接各字段值
   | 'scientific'  // 科学计数法：尾数×10^指数（指数取指数字段）
-  | 'product';    // 数值乘积：尾数 × 10 的指数次方，输出普通数字
+  | 'product'     // 数值乘积：尾数 × 10 的指数次方，输出普通数字
+  | 'text';       // 固定文本：不取字段值，直接输出 output.text（如 <10、未检出）
 
 // 单条条件
 export interface MergeCondition {
@@ -173,15 +225,34 @@ export interface MergeOutput {
   superscript?: boolean;      // scientific：指数用上标字符（³）而非 ^3，默认 true
   times?: string;             // scientific：底数文本，默认 '×10'
   precision?: number | null;  // 尾数保留小数位；null/undefined = 原样输出
-  fallback?: string;          // 条件不满足时的输出，默认空串
+  text?: string;              // text：固定输出文本（不取字段值）
+  fallback?: string;          // scientific / product：本分支命中但算不出数值时的输出
 }
 
-// 一个合并字段的完整规则
-export interface MergeRule {
+// 规则里的一个分支：一组条件 + 命中后如何输出
+// conditions 为空 = 无条件（常用作末尾「其他情况」兜底分支）
+export interface MergeBranch {
   join: MergeJoin;
   conditions: MergeCondition[];
   output: MergeOutput;
 }
+
+// 一个合并字段的完整规则
+// 多分支按数组顺序匹配：第一个条件满足的分支生效；全部不命中则输出空串。
+export interface MergeRule {
+  branches: MergeBranch[];
+}
+
+// 旧版（单分支）规则形态：{ join, conditions, output.fallback }
+// 仅用于读取历史配置，normalizeMergeRule 会把它迁移成 branches。
+export interface LegacyMergeRule {
+  join?: MergeJoin;
+  conditions?: MergeCondition[];
+  output?: MergeOutput;
+}
+
+// 落盘 / 接口里读到的原始规则（新旧形态都可能）
+export type RawMergeRule = Partial<MergeRule> & LegacyMergeRule;
 
 // 某张表下的全部合并字段规则：键为「签名」（占位符内字段名按顺序用 | 连接）
 export type MergeFieldConfig = Record<string, MergeRule>;
@@ -192,9 +263,16 @@ export interface MergeHit {
   fields: string[];  // 如 ['细菌数量','细菌乘方']
 }
 
+// 合并字段取值作用域：循环内的「外层逐级 + 当前行」合并对象；
+// 不传（顶层取值）时按整条记录的数据取值。
+export type MergeScope = Record<string, PrintDataValue>;
+
 // 填充引擎使用的合并绑定：把签名解析为「生成标签 → 输出值」
+// scope = 循环内当前行的取值作用域（含父级回退），不传则取顶层数据
+// warn  = 取值异常提示通道（如循环内某行引用的字段为空、算不出值），由调用方收集后展示
 export interface MergeBindOptions {
-  resolve: (signature: string, fields: string[]) => string;
+  resolve: (signature: string, fields: string[], scope?: MergeScope) => string;
+  warn?: (message: string) => void;
 }
 
 export const MERGE_OP_LABEL: Record<MergeCondOp, string> = {
@@ -212,12 +290,19 @@ export const MERGE_MODE_LABEL: Record<MergeOutputMode, string> = {
   concat: '直接拼接',
   scientific: '科学计数法',
   product: '数值乘积',
+  text: '固定文本',
 };
 
-export const DEFAULT_MERGE_RULE: MergeRule = {
+// 新建分支时的默认内容
+export const DEFAULT_MERGE_BRANCH: MergeBranch = {
   join: 'and',
   conditions: [],
   output: { mode: 'concat', separator: '', superscript: true, times: '×10' },
+};
+
+// 单分支默认规则（与旧版「未设置」行为一致：紧密拼接）
+export const DEFAULT_MERGE_RULE: MergeRule = {
+  branches: [{ ...DEFAULT_MERGE_BRANCH, output: { ...DEFAULT_MERGE_BRANCH.output } }],
 };
 
 export const DEFAULT_STAMP_CONFIG: StampConfig = {

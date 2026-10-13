@@ -18,7 +18,7 @@ function load(rel) {
   new Function('module', 'exports', 'require', compile(rel))(mod, mod.exports, (id) => {
     if (id === 'pizzip') return PizZip;
     if (id === 'docxtemplater') return require(path.resolve(ROOT, 'node_modules', 'docxtemplater'));
-    if (id.startsWith('./')) {
+    if (id.startsWith('./') || id.startsWith('../')) {
       const dep = path.normalize(path.join(path.dirname(rel), `${id}.ts`)).replace(/\\/g, '/');
       return load(dep);
     }

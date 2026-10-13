@@ -87,6 +87,13 @@ set "RC=%ERRORLEVEL%"
 echo [step] setupCore exit=%RC% >> "%LOG%"
 if defined SILENT goto :END
 echo.
+if not "%RC%"=="0" (
+echo  [FAILED] deploy did NOT finish -- the fixed URL is probably unreachable now.
+echo           check deploy-log.txt before believing any success wording above.
+echo           quick check: run  %~nx0 doctor
+) else (
+echo  [OK] deploy finished, the fixed URL above should be reachable.
+)
 echo  [hint] logs: deploy-log.txt , .run\named-tunnel.err.log
 echo         diagnose: %~nx0 doctor
 pause

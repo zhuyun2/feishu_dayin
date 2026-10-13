@@ -31,6 +31,22 @@
           "sys": "date"
         }
       ]
+    },
+    "tbldeXFrTixlf6sB": {
+      "enabled": true,
+      "join": "-",
+      "parts": [
+        {
+          "kind": "field",
+          "fieldId": "fld4WQeYz6",
+          "fieldName": "产品名称"
+        },
+        {
+          "kind": "field",
+          "fieldId": "fldeF7gp6G",
+          "fieldName": "生产日期"
+        }
+      ]
     }
   },
   "mergeFields": {
@@ -52,7 +68,113 @@
           "superscript": true,
           "times": "×10",
           "precision": null,
+          "text": "",
           "fallback": "<10"
+        }
+      },
+      "真菌数量|真菌乘方v2": {
+        "join": "and",
+        "conditions": [
+          {
+            "field": "真菌数量",
+            "op": "gt",
+            "value": "0"
+          }
+        ],
+        "output": {
+          "mode": "scientific",
+          "separator": "",
+          "mantissaField": "",
+          "exponentField": "",
+          "superscript": true,
+          "times": "×10",
+          "precision": null,
+          "text": "",
+          "fallback": "<10"
+        }
+      },
+      "真菌数量|真菌乘方v2|判断字段": {
+        "branches": [
+          {
+            "join": "and",
+            "conditions": [
+              {
+                "field": "判断字段",
+                "op": "gte",
+                "value": "100"
+              }
+            ],
+            "output": {
+              "mode": "scientific",
+              "separator": "",
+              "mantissaField": "",
+              "exponentField": "",
+              "superscript": true,
+              "times": "×10",
+              "precision": null,
+              "text": "",
+              "fallback": ""
+            }
+          },
+          {
+            "join": "and",
+            "conditions": [
+              {
+                "field": "判断字段",
+                "op": "lt",
+                "value": "100"
+              }
+            ],
+            "output": {
+              "mode": "product",
+              "separator": "",
+              "mantissaField": "",
+              "exponentField": "",
+              "superscript": true,
+              "times": "×10",
+              "precision": null,
+              "text": "",
+              "fallback": ""
+            }
+          },
+          {
+            "join": "and",
+            "conditions": [
+              {
+                "field": "真菌数量",
+                "op": "eq",
+                "value": "0"
+              }
+            ],
+            "output": {
+              "mode": "text",
+              "separator": "<10",
+              "mantissaField": "",
+              "exponentField": "",
+              "superscript": true,
+              "times": "×10",
+              "precision": null,
+              "text": "<10",
+              "fallback": ""
+            }
+          }
+        ]
+      }
+    },
+    "tbl8SmrWcQadcF9k": {
+      "细菌数量|细菌乘方v2": {
+        "join": "and",
+        "conditions": [],
+        "output": {
+          "mode": "scientific",
+          "separator": "",
+          "mantissaField": "",
+          "exponentField": "",
+          "superscript": true,
+          "times": "×10",
+          "precision": null,
+          "text": "",
+          "fallback": ""
         }
       },
       "真菌数量|真菌乘方v2": {
@@ -66,8 +188,27 @@
           "superscript": true,
           "times": "×10",
           "precision": null,
+          "text": "",
           "fallback": ""
         }
+      }
+    }
+  },
+  "attachmentImages": {
+    "tblynpNBtItwJaGZ": {
+      "图片": {
+        "widthCm": 2
+      },
+      "物流单拍照": {
+        "widthCm": 3
+      }
+    },
+    "tbl8SmrWcQadcF9k": {
+      "菌落总数报告": {
+        "widthCm": 6
+      },
+      "报告-附件2": {
+        "widthCm": 5
       }
     }
   }

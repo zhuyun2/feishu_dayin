@@ -1,6 +1,6 @@
 import PizZip from 'pizzip';
 import type { MergeHit } from '../types';
-import { scanMerges } from './mergeField';
+import { scanMerges, scanLoopFields } from './mergeField';
 
 // ============================================================================
 // 从模板文件里检测复合占位符 {{A}{B}}
@@ -52,4 +52,26 @@ export function detectTemplateMerges(buffer: ArrayBuffer, name: string): MergeHi
     }
   }
   return Array.from(seen.values());
+}
+
+// ============================================================================
+// 从模板文件里检测「被用作循环的字段名」（{#字段} … {/字段}）
+// ----------------------------------------------------------------------------
+// 数据层拿到这个清单后，才会把「子表内的关联字段」递归展开成数组，
+// 从而支持两层嵌套循环；模板里没写成循环的嵌套关联字段仍按汇总文本输出。
+// 扫描范围与 detectTemplateMerges 一致（正文 + 页眉页脚 / 共享字符串 + 首个工作表）。
+// ============================================================================
+export function detectTemplateLoops(buffer: ArrayBuffer, name: string): string[] {
+  let parts: string[];
+  try {
+    parts = collectXmlParts(new PizZip(buffer), name);
+  } catch (e) {
+    return [];
+  }
+
+  const names = new Set<string>();
+  for (const xml of parts) {
+    for (const field of scanLoopFields(xml)) names.add(field);
+  }
+  return Array.from(names);
 }

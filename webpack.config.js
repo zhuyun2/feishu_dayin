@@ -65,6 +65,8 @@ module.exports = {
       require('./server/setupApi')(devServer.app, {
         port: Number(process.env.PORT) || 5173,
       });
+      // 挂载飞书云文档传输 API（OAuth 用户授权 + 云盘文件夹浏览 + 推送文档）
+      require('./server/feishuCloudApi')(devServer.app);
       return middlewares;
     },
   },

@@ -1,5 +1,6 @@
 import PizZip from 'pizzip';
 import type { StampConfig, StampPosition } from '../types';
+import { base64ToBytes, bytesToBase64, detectImage } from './imageBytes';
 
 // ============ 电子印章注入（下载用） ============
 // 把印章图片以「浮动于文字上方」的 anchor 形式写入渲染后的 docx：
@@ -28,58 +29,6 @@ export const STAMP_POSITION_BASE: Record<StampPosition, { x: number; y: number }
   'right-top': { x: 72, y: 8 },
   'bottom-center': { x: 50, y: 72 },
 };
-
-// ===== 图片尺寸解析（PNG/JPEG，只读头部） =====
-
-function parsePngSize(bin: Uint8Array): { w: number; h: number } | null {
-  // PNG: 8 字节签名 + IHDR，宽高在 offset 16/20（大端）
-  if (bin.length < 24) return null;
-  const w = (bin[16] << 24) | (bin[17] << 16) | (bin[18] << 8) | bin[19];
-  const h = (bin[20] << 24) | (bin[21] << 16) | (bin[22] << 8) | bin[23];
-  if (w <= 0 || h <= 0) return null;
-  return { w, h };
-}
-
-function parseJpegSize(bin: Uint8Array): { w: number; h: number } | null {
-  // JPEG: 扫描 SOFn 段（C0-CF 除 C4/C8/CC），高宽在段内 offset 5/7（大端）
-  let i = 2;
-  while (i + 9 < bin.length) {
-    if (bin[i] !== 0xff) { i += 1; continue; }
-    const marker = bin[i + 1];
-    if (marker === 0xd8 || marker === 0x01) { i += 2; continue; }
-    if (marker >= 0xd0 && marker <= 0xd7) { i += 2; continue; }
-    const len = (bin[i + 2] << 8) | bin[i + 3];
-    if (len < 2) return null;
-    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
-      const h = (bin[i + 5] << 8) | bin[i + 6];
-      const w = (bin[i + 7] << 8) | bin[i + 8];
-      if (w <= 0 || h <= 0) return null;
-      return { w, h };
-    }
-    i += 2 + len;
-  }
-  return null;
-}
-
-function detectImage(bin: Uint8Array): { w: number; h: number; ext: string } | null {
-  if (bin.length >= 8 && bin[0] === 0x89 && bin[1] === 0x50 && bin[2] === 0x4e && bin[3] === 0x47) {
-    const s = parsePngSize(bin);
-    return s ? { ...s, ext: 'png' } : null;
-  }
-  if (bin.length >= 3 && bin[0] === 0xff && bin[1] === 0xd8 && bin[2] === 0xff) {
-    const s = parseJpegSize(bin);
-    return s ? { ...s, ext: 'jpg' } : null;
-  }
-  return null;
-}
-
-function base64ToBytes(b64: string): Uint8Array {
-  const clean = b64.replace(/^data:[^;]+;base64,/, '');
-  const binary = atob(clean);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
-}
 
 // ===== 页面尺寸 =====
 
@@ -326,11 +275,5 @@ export async function stampDocxBlob(
 
 // ArrayBuffer → base64（配合 fetchStampBuffer 使用）
 export function arrayBufferToBase64(buf: ArrayBuffer): string {
-  const bytes = new Uint8Array(buf);
-  let binary = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
-  }
-  return btoa(binary);
+  return bytesToBase64(new Uint8Array(buf));
 }
