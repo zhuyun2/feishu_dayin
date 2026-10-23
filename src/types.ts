@@ -28,6 +28,20 @@ export interface MatchConfig {
   mergeFields?: Record<string, MergeFieldConfig>;
   // 附件图片输出尺寸：attachmentImages[tableId][字段名] = { widthCm }
   attachmentImages?: AttachmentImageConfig;
+  // 云文档推送后的自动化通知：cloudPush[baseId] = { webhookUrl, bodyTemplate }
+  // 按「多维表格文档」独立保存（baseId = 多维表格 appToken），一个多维表格配一次即可
+  cloudPush?: Record<string, CloudPushConfig>;
+}
+
+// ============ 云文档推送 · 自动化通知 ============
+// 推送成功后 POST 一条 JSON 到「多维表格自动化 → 接收到 webhook 时」的地址。
+// bodyTemplate 里的 {{变量}} 在发送前用真实值替换（按 JSON 字符串转义），
+// 因此占位符必须写在 JSON 的字符串里，例如 "fileName": "{{fileName}}"。
+export interface CloudPushConfig {
+  /** 是否启用通知。默认 false（不启用）；启用但 webhookUrl 为空仍不会发送 */
+  enabled?: boolean;
+  webhookUrl?: string;
+  bodyTemplate?: string;
 }
 
 // ============ 附件图片 ============

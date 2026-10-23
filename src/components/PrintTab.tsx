@@ -6,7 +6,7 @@ import {
 } from '@ant-design/icons';
 import { saveAs } from 'file-saver';
 
-import type { TemplateInfo, MatchConfig, MatchKind, StampConfig, StampInfo, StampPageSetting, MergeHit, AttachSizeConfig } from '../types';
+import type { TemplateInfo, MatchConfig, MatchKind, StampConfig, StampInfo, StampPageSetting, MergeHit, AttachSizeConfig, CloudPushConfig } from '../types';
 import { DEFAULT_STAMP_CONFIG, STAMP_POSITION_LABEL } from '../types';
 import type { ActiveRecordState } from '../hooks/useActiveRecord';
 import { fetchTemplateBuffer, putConfig } from '../services/templateApi';
@@ -441,6 +441,13 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active.tableId, active.recordId, matchConfig, active.table, active.fieldMetas]);
 
+  // 校验拦截：打印 / 下载共用。
+  // 读取校验值期间（loading）也视为拦截，避免切记录瞬间用上一条记录的通过结果放行。
+  const checkBlocked = checkActive && (printCheck.loading || !printCheck.passed);
+  const checkBlockReason = printCheck.loading
+    ? '正在校验当前记录…'
+    : (printCheck.reason || '当前记录未通过打印校验');
+
   // 按当前配置构建打印叠加层（印章 base64 走缓存，读取失败则本次不盖章）
   const buildOverlay = async (): Promise<PrintOverlay | undefined> => {
     const cfg = stampConfigRef.current;
@@ -460,8 +467,8 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
     if (printing) return;
 
     // 打印校验未通过：按钮已置灰，此处兜底拦截
-    if (checkActive && active.recordId && !printCheck.passed && !printCheck.loading) {
-      message.warning(printCheck.reason || '当前记录未通过打印校验');
+    if (checkActive && active.recordId && checkBlocked) {
+      message.warning(checkBlockReason);
       return;
     }
 
@@ -552,6 +559,11 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
   ]);
 
   const handleDownload = async () => {
+    // 与打印同一套校验：未通过（或仍在读取校验值）时不允许下载，防止绕过打印限制
+    if (checkActive && active.recordId && checkBlocked) {
+      message.warning(checkBlockReason);
+      return;
+    }
     const out = await buildExport();
     if (!out) return;
     saveAs(out.blob, out.fileName);
@@ -571,6 +583,18 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
       .then((saved) => onConfigChanged(saved))
       .catch(() => message.error('附件图片设置保存失败'));
   }, [active.tableId, matchConfig, onConfigChanged]);
+
+  // 推送通知设置：按「多维表格文档(baseId)」独立保存到 _config.json 的 cloudPush 段。
+  // 一个多维表格只需配一次，其下所有数据表共用。
+  // 始终整条保存（含 enabled），这样关掉开关后地址与模板仍保留，便于再次开启。
+  const saveCloudPush = useCallback(async (cfg: CloudPushConfig) => {
+    const key = active.baseId;
+    if (!key) throw new Error('未获取到多维表格标识，无法保存');
+    const merged = { ...(matchConfig.cloudPush || {}), [key]: cfg };
+    const next: MatchConfig = { ...matchConfig, cloudPush: merged };
+    const saved = await putConfig(next);
+    onConfigChanged(saved);
+  }, [active.baseId, matchConfig, onConfigChanged]);
 
   const templateOptions = useMemo(
     () => templates.map((t) => ({ label: t.name, value: t.name })),
@@ -927,27 +951,36 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
       {/* 底部固定操作栏 */}
       {/* flexWrap：侧边栏较窄时「推送云文档」自动落到第二行独占一行，不挤坏打印/下载 */}
       <div style={{ background: '#fff', borderTop: '1px solid #e5e6eb', padding: '10px 16px', display: 'flex', flexWrap: 'wrap', gap: 10, flexShrink: 0 }}>
-        <Button
-          type="primary"
-          style={{ flex: 1, minWidth: 108, height: 38, borderRadius: 8, fontSize: 14, fontWeight: 500 }}
-          onClick={handlePrint}
-          loading={printing}
-          disabled={printing || !selected || noRecord || (checkActive && !printCheck.passed)}
-        >
-          {!printing && <PrinterOutlined />}{' '}
-          {printing
-            ? '正在加载打印…'
-            : multiCopy
-            ? '打印(5联)'
-            : '打印'}
-        </Button>
-        <Button
-          style={{ flex: 1, minWidth: 92, height: 38, borderRadius: 8, border: '1px solid #e5e6eb', fontSize: 14, fontWeight: 500 }}
-          onClick={handleDownload}
-          disabled={!selected || noRecord}
-        >
-          <DownloadOutlined /> 下载
-        </Button>
+        {/* 校验未通过时用悬浮提示说明原因：按钮已置灰不响应鼠标事件，需由 span 承接 Tooltip */}
+        <Tooltip title={checkBlocked ? checkBlockReason : undefined} styles={{ root: { maxWidth: 360 } }}>
+          <span style={{ flex: 1, minWidth: 108, display: 'flex' }}>
+            <Button
+              type="primary"
+              style={{ flex: 1, height: 38, borderRadius: 8, fontSize: 14, fontWeight: 500 }}
+              onClick={handlePrint}
+              loading={printing}
+              disabled={printing || !selected || noRecord || checkBlocked}
+            >
+              {!printing && <PrinterOutlined />}{' '}
+              {printing
+                ? '正在加载打印…'
+                : multiCopy
+                ? '打印(5联)'
+                : '打印'}
+            </Button>
+          </span>
+        </Tooltip>
+        <Tooltip title={checkBlocked ? checkBlockReason : undefined} styles={{ root: { maxWidth: 360 } }}>
+          <span style={{ flex: 1, minWidth: 92, display: 'flex' }}>
+            <Button
+              style={{ flex: 1, height: 38, borderRadius: 8, border: '1px solid #e5e6eb', fontSize: 14, fontWeight: 500 }}
+              onClick={handleDownload}
+              disabled={!selected || noRecord || checkBlocked}
+            >
+              <DownloadOutlined /> 下载
+            </Button>
+          </span>
+        </Tooltip>
         <DownloadNameEntryButton
           size="middle"
           style={{ height: 38, borderRadius: 8, flexShrink: 0 }}
@@ -968,6 +1001,9 @@ export default function PrintTab({ active, templates, matchConfig, onNeedTemplat
         open={pushModalOpen}
         onClose={() => setPushModalOpen(false)}
         prepare={preparePush}
+        baseId={active.baseId}
+        cloudPushConfig={active.baseId ? matchConfig.cloudPush?.[active.baseId] : undefined}
+        onSaveCloudPush={saveCloudPush}
       />
 
       <DownloadNameModal

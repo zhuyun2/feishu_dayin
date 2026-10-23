@@ -55,6 +55,6 @@ export async function checkPrintAllowed(params: {
   return {
     ok: false,
     fieldValue,
-    message: `当前记录「${fieldName}」为「${fieldValue || '空'}」，不允许打印。需为：${allowedValues.map((v) => `「${v}」`).join(' / ')}`,
+    message: `当前记录「${fieldName}」为「${fieldValue || '空'}」，未通过校验，暂不可打印 / 下载。需为：${allowedValues.map((v) => `「${v}」`).join(' / ')}`,
   };
 }

@@ -9,6 +9,16 @@
       "checkAllowedValues": [
         "通过"
       ]
+    },
+    "tblynpNBtItwJaGZ": {
+      "matchFieldId": "",
+      "matchFieldName": "",
+      "checkEnabled": true,
+      "checkFieldId": "fldDqWNdY7",
+      "checkFieldName": "是否允许打印",
+      "checkAllowedValues": [
+        "通过"
+      ]
     }
   },
   "downloadNames": {
@@ -210,6 +220,13 @@
       "报告-附件2": {
         "widthCm": 5
       }
+    }
+  },
+  "cloudPush": {
+    "ZTUMbyF1ja23cUs8u8dcMRNmnMe": {
+      "enabled": true,
+      "webhookUrl": "https://ocnlt4yry748.feishu.cn/base/automation/webhook/event/EAqxanqWWweZyuh53xAc5g9hnve",
+      "bodyTemplate": "{\n  \"fileName\": \"{{fileName}}\",\n  \"pusher\": \"{{pusher}}\",\n  \"text\": \"{{pusher}} 推送了「{{fileName}}」到飞书云盘\",\n  \"pushedAt\": \"{{pushedAt}}\",\n  \"fileUrl\": \"{{fileUrl}}\",\n  \"folderName\": \"{{folderName}}\"\n}"
     }
   }
 }

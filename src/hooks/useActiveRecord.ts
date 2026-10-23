@@ -4,6 +4,7 @@ import type { FieldMetaLite } from '../types';
 
 export interface ActiveRecordState {
   loading: boolean;
+  baseId: string | null; // 多维表格文档 ID（appToken）；用于「按多维表格」独立配置
   table: ITable | null;
   tableId: string | null;
   tableName: string;
@@ -16,6 +17,7 @@ export interface ActiveRecordState {
 
 const EMPTY: ActiveRecordState = {
   loading: true,
+  baseId: null,
   table: null,
   tableId: null,
   tableName: '',
@@ -43,6 +45,7 @@ async function getVisibleFieldIds(table: any): Promise<string[]> {
 export function useActiveRecord(): ActiveRecordState {
   const [state, setState] = useState<ActiveRecordState>(EMPTY);
   const tableIdRef = useRef<string | null>(null);
+  const baseIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -87,9 +90,13 @@ export function useActiveRecord(): ActiveRecordState {
       setState((s) => ({ ...s, recordId, primaryText }));
     }
 
-    async function handleSelection(sel: { tableId: string | null; recordId: string | null }) {
+    async function handleSelection(sel: { tableId: string | null; recordId: string | null; baseId?: string | null }) {
       try {
         if (!sel.tableId) return;
+        if (sel.baseId && sel.baseId !== baseIdRef.current) {
+          baseIdRef.current = sel.baseId;
+          setState((s) => ({ ...s, baseId: sel.baseId! }));
+        }
         // 切表：重载表元信息
         if (sel.tableId !== tableIdRef.current) {
           await loadTable(sel.tableId);
@@ -106,6 +113,11 @@ export function useActiveRecord(): ActiveRecordState {
       try {
         const selection = await bitable.base.getSelection();
         const tableId = selection.tableId || (await bitable.base.getActiveTable()).id;
+        // baseId = 当前多维表格文档 ID，用于「按多维表格」独立保存推送通知配置
+        if (selection.baseId) {
+          baseIdRef.current = selection.baseId;
+          setState((s) => ({ ...s, baseId: selection.baseId }));
+        }
         await loadTable(tableId);
         const table = await bitable.base.getTableById(tableId);
         const metas = (await table.getFieldMetaList()) as unknown as FieldMetaLite[];
@@ -130,7 +142,11 @@ export function useActiveRecord(): ActiveRecordState {
 
     off = bitable.base.onSelectionChange((e) => {
       const data = (e && (e as any).data) || e;
-      handleSelection({ tableId: data?.tableId ?? null, recordId: data?.recordId ?? null });
+      handleSelection({
+        tableId: data?.tableId ?? null,
+        recordId: data?.recordId ?? null,
+        baseId: data?.baseId ?? null,
+      });
     });
 
     return () => {

@@ -289,6 +289,36 @@ function cleanAttachmentImages(raw) {
   return out;
 }
 
+// ============ 云文档推送 · 自动化通知（cloudPush）落盘校验 ============
+// 前端结构：{ [baseId]: { webhookUrl, bodyTemplate } }
+// baseId 是多维表格文档 ID（appToken），只允许字母数字与 - _。
+// webhookUrl 仅允许 http(s)，避免 javascript: 之类的脏值被前端当成链接渲染。
+// bodyTemplate 限长，防止配置文件被撑爆（模板本身很小，8KB 足够）。
+
+const MAX_TEMPLATE_LEN = 8192;
+
+function cleanCloudPush(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  Object.keys(raw).slice(0, 200).forEach((baseId) => {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(baseId)) return;
+    const cfg = raw[baseId];
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return;
+    const enabled = cfg.enabled === true;
+    const webhookUrl = typeof cfg.webhookUrl === 'string' ? cfg.webhookUrl.trim() : '';
+    if (webhookUrl && !/^https?:\/\/\S+$/i.test(webhookUrl)) return;
+    const bodyTemplate = typeof cfg.bodyTemplate === 'string' ? cfg.bodyTemplate.slice(0, MAX_TEMPLATE_LEN) : '';
+    // 全空（未启用 + 无地址 + 无模板）才丢弃；「已启用但没填地址」要保留，便于下次打开时还显示启用态
+    if (!enabled && !webhookUrl && !bodyTemplate) return;
+    const item = {};
+    if (enabled) item.enabled = true;
+    if (webhookUrl) item.webhookUrl = webhookUrl;
+    if (bodyTemplate) item.bodyTemplate = bodyTemplate;
+    out[baseId] = item;
+  });
+  return out;
+}
+
 module.exports = function attach(app) {
   ensureStore();
 
@@ -384,12 +414,13 @@ module.exports = function attach(app) {
       if (body.tables != null && (typeof body.tables !== 'object' || Array.isArray(body.tables))) {
         throw httpError(400, 'tables 需为对象');
       }
-      // 只落盘已知字段（tables + downloadNames + mergeFields + attachmentImages），避免未知字段污染配置文件
+      // 只落盘已知字段（tables + downloadNames + mergeFields + attachmentImages + cloudPush），避免未知字段污染配置文件
       const next = {
         tables: body.tables && typeof body.tables === 'object' ? body.tables : {},
         downloadNames: cleanDownloadNames(body.downloadNames),
         mergeFields: cleanMergeFields(body.mergeFields),
         attachmentImages: cleanAttachmentImages(body.attachmentImages),
+        cloudPush: cleanCloudPush(body.cloudPush),
       };
       fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2), 'utf8');
       send(res, 200, next);

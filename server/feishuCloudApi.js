@@ -80,6 +80,20 @@ function clearToken() {
   try { fs.rmSync(TOKEN_PATH, { force: true }); } catch (e) { /* 忽略 */ }
 }
 
+// 判断当前授权是否**真的可用**。
+// 只看「有没有 accessToken」是不够的：accessToken 只有 2 小时有效期，
+// 只要 refresh_token 还在有效期内就能自动续上；两者都失效才需要用户重新授权。
+// 之前这里只判 token 存在，导致 refresh 过期后界面仍显示「已授权」、且不出现重新授权按钮。
+function authState() {
+  const t = loadToken();
+  if (!t || !t.accessToken) return { authorized: false, expired: false, token: null };
+  const now = Date.now();
+  const accessUsable = !t.expiresAt || now < t.expiresAt - REFRESH_MARGIN_MS;
+  const canRefresh = !!t.refreshToken && (!t.refreshExpiresAt || now < t.refreshExpiresAt);
+  if (accessUsable || canRefresh) return { authorized: true, expired: false, token: t };
+  return { authorized: false, expired: true, token: t };
+}
+
 // 隧道(cloudflare)后 req.protocol 常为 http，必须优先读 X-Forwarded-*，
 // 否则推导出的 redirectUri 与飞书后台登记的不一致 → 授权直接失败。
 function publicOrigin(req) {
@@ -192,9 +206,9 @@ async function getValidToken() {
   if (!t) throw httpError(401, '尚未授权飞书账号，请先点击「去飞书授权」');
   if (t.expiresAt && Date.now() < t.expiresAt - REFRESH_MARGIN_MS) return t.accessToken;
 
-  if (!t.refreshToken) throw httpError(401, '飞书授权已过期，请重新点击「去飞书授权」');
+  if (!t.refreshToken) throw httpError(401, '飞书授权已过期，请重新授权');
   if (t.refreshExpiresAt && Date.now() >= t.refreshExpiresAt) {
-    throw httpError(401, '飞书授权已超过 30 天未使用，请重新点击「去飞书授权」');
+    throw httpError(401, '飞书授权已超过 30 天未使用，请重新授权');
   }
 
   // 并发去重：多个请求同时过期只刷一次
@@ -284,6 +298,134 @@ async function uploadFile({ token, folderToken, fileName, buffer }) {
   };
 }
 
+// ============ 多维表格自动化 Webhook ============
+// 推送成功后 POST 一条 JSON 到「多维表格自动化 → 接收到 webhook 时」的地址。
+// 配置按「多维表格文档(baseId)」独立保存，落在 templates/_config.json 的 cloudPush 段：
+//   cloudPush[baseId] = { webhookUrl, bodyTemplate }
+// 某个多维表格没单独配置时，回退到 server/feishuConfig.json 的 webhookUrl（兼容早期全局配置）。
+//
+// 官方约束：请求体必须是合法 JSON；若自动化里把请求体设为「发送示例请求」，
+// 字段结构要与示例一致（否则报 800006003）。通知失败**不影响**已上传的文件。
+
+const APP_CONFIG_PATH = path.join(__dirname, '..', 'templates', '_config.json');
+
+const WEBHOOK_TIMEOUT_MS = 10000;
+const WEBHOOK_ERRORS = {
+  800004509: '该自动化的 webhook 触发已被停用，请在多维表格里启用',
+  800005647: '通知请求体过大（上限 4MB）',
+  800005649: 'Bearer token 校验失败：自动化开启了凭证校验',
+  800005650: '来源 IP 不在自动化的 IP 白名单内',
+  800005652: '触发过于频繁被限流，请稍后重试',
+  800006003: '请求体结构与自动化里的「示例请求」不一致，请按文档给的 JSON 结构重设示例',
+};
+
+// 默认请求体模板：变量会在发送前替换，所以必须写在 JSON 字符串里
+const DEFAULT_BODY_TEMPLATE = [
+  '{',
+  '  "fileName": "{{fileName}}",',
+  '  "pusher": "{{pusher}}",',
+  '  "text": "{{pusher}} 推送了「{{fileName}}」到飞书云盘",',
+  '  "pushedAt": "{{pushedAt}}",',
+  '  "fileUrl": "{{fileUrl}}",',
+  '  "folderName": "{{folderName}}"',
+  '}',
+].join('\n');
+
+// 可引用的变量（供前端设置面板展示）
+const TEMPLATE_VARS = ['fileName', 'pusher', 'text', 'pushedAt', 'fileUrl', 'folderName'];
+
+function formatLocalTime(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+// 只认「当前多维表格」自己的配置；默认不启用。
+// active（真正会发通知）= 启用 && 地址非空 —— 两者缺一都不发。
+function resolveWebhookConfig(baseId) {
+  const appCfg = readJson(APP_CONFIG_PATH) || {};
+  const push = appCfg.cloudPush && typeof appCfg.cloudPush === 'object' ? appCfg.cloudPush : {};
+  const per = baseId ? push[baseId] : null;
+  const enabled = !!(per && per.enabled === true);
+  const url = (per && String(per.webhookUrl || '').trim()) || '';
+  return {
+    enabled,
+    webhookUrl: url,
+    bodyTemplate: (per && String(per.bodyTemplate || '').trim()) || DEFAULT_BODY_TEMPLATE,
+    active: enabled && !!url,
+  };
+}
+
+// 把 {{变量}} 替换成真实值；值按 JSON 字符串转义（去掉首尾引号），
+// 因此模板里的占位符必须写在 JSON 字符串中，如 "fileName": "{{fileName}}"。
+// 未知变量原样保留 —— 让用户一眼看出写错了，而不是被静默清空。
+function renderBodyTemplate(template, vars) {
+  return String(template).replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, (m, name) => {
+    if (!Object.prototype.hasOwnProperty.call(vars, name)) return m;
+    return JSON.stringify(String(vars[name] == null ? '' : vars[name])).slice(1, -1);
+  });
+}
+
+// override：设置面板「测试发送」时可直接传未保存的 webhookUrl / bodyTemplate
+async function sendAutomationWebhook({ baseId, fileName, pusher, fileUrl, folderName, override }) {
+  const resolved = resolveWebhookConfig(baseId);
+  // override（设置面板的「测试发送」）绕过启用开关，但地址仍必须有效
+  const hasOverride = !!(override && (override.webhookUrl !== undefined || override.bodyTemplate !== undefined));
+  const webhookUrl = override && override.webhookUrl !== undefined
+    ? String(override.webhookUrl).trim()
+    : resolved.webhookUrl;
+  const bodyTemplate = override && override.bodyTemplate !== undefined && String(override.bodyTemplate).trim()
+    ? String(override.bodyTemplate)
+    : resolved.bodyTemplate;
+
+  // 未启用 → 一律不发；已启用但地址为空 → 也不发
+  if (!hasOverride) {
+    if (!resolved.enabled) return { skipped: true, reason: 'disabled' };
+    if (!resolved.webhookUrl) return { skipped: true, reason: 'no-url' };
+  }
+  if (!webhookUrl) return { skipped: true, reason: 'no-url' };
+
+  const vars = {
+    fileName: fileName || '',
+    pusher: pusher || '',
+    text: `${pusher || '有人'} 推送了「${fileName || ''}」到飞书云盘`,
+    pushedAt: formatLocalTime(new Date()),
+    fileUrl: fileUrl || '',
+    folderName: folderName || '',
+  };
+
+  let payload;
+  try {
+    payload = JSON.parse(renderBodyTemplate(bodyTemplate, vars));
+  } catch (e) {
+    return { ok: false, error: `通知请求体模板替换后不是合法 JSON：${e.message}` };
+  }
+
+  let res;
+  try {
+    res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+    });
+  } catch (e) {
+    return { ok: false, error: `通知失败，无法连接自动化 Webhook：${e.message || e}` };
+  }
+
+  const json = await res.json().catch(() => null);
+  if (!json) return { ok: false, error: `通知失败，Webhook 返回非 JSON（HTTP ${res.status}）` };
+  if (json.code !== 0) {
+    const hint = WEBHOOK_ERRORS[json.code];
+    return {
+      ok: false,
+      code: json.code,
+      error: hint ? `通知失败：${hint}（code ${json.code}）` : `通知失败（code ${json.code}）：${json.msg || '未知错误'}`,
+    };
+  }
+  return { ok: true };
+}
+
+
 // ============ OAuth state（防 CSRF，内存即可，重启即失效） ============
 const pendingStates = new Map();
 
@@ -304,6 +446,26 @@ function consumeState(state) {
 
 // ============ 路由 ============
 
+// 从「文件夹链接」或纯 token 里解析出 folder_token。
+// 飞书的文件夹地址形如：
+//   https://xxx.feishu.cn/drive/folder/<token>
+//   https://xxx.feishu.cn/drive/shared/folder/<token>
+//   https://xxx.feishu.cn/folder/<token>
+// 共享文件夹（别人共享给你 / 共享空间）不在「我的空间」清单里，
+// 目前没有公开接口可以枚举，只能靠粘贴链接拿到 token 后直接访问。
+function parseFolderRef(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  if (/^[A-Za-z0-9_-]{10,80}$/.test(s)) return s; // 直接粘的 token
+  const m = s.match(/\/folder\/([A-Za-z0-9_-]{10,80})/);
+  if (m) return m[1];
+  try {
+    const seg = new URL(s).pathname.split('/').filter(Boolean).pop() || '';
+    if (/^[A-Za-z0-9_-]{10,80}$/.test(seg)) return seg;
+  } catch (e) { /* 不是 URL，忽略 */ }
+  return '';
+}
+
 module.exports = function attach(app) {
   const jsonBody = express.json({ limit: '1mb' });
 
@@ -319,13 +481,22 @@ module.exports = function attach(app) {
         hint: `未配置飞书应用凭证：请在 ${path.relative(path.join(__dirname, '..'), CONFIG_PATH)} 填入 appId / appSecret（可复制 feishuConfig.example.json）`,
       });
     }
-    const t = loadToken();
-    const authorized = !!(t && t.accessToken);
+    const st = authState();
+    // base_id 可选：带上时按该多维表格的独立配置判断「通知是否已配置」
+    const webhook = resolveWebhookConfig(String(req.query.base_id || ''));
     res.json({
       configured: true,
-      authorized,
-      user: t?.user || null,
-      expiresAt: t?.expiresAt || 0,
+      authorized: st.authorized,
+      // 有令牌但 access + refresh 都已过期 → 必须重新授权
+      authExpired: st.expired,
+      user: st.token?.user || null,
+      expiresAt: st.token?.expiresAt || 0,
+      refreshExpiresAt: st.token?.refreshExpiresAt || 0,
+      // webhookConfigured = 真正会发通知（启用 + 地址非空），前端据此显示提示
+      webhookConfigured: webhook.active,
+      webhookEnabled: webhook.enabled,
+      defaultBodyTemplate: DEFAULT_BODY_TEMPLATE,
+      templateVars: TEMPLATE_VARS,
       redirectUri: redirectUriFor(req),
       scopes: cfg.scopes,
     });
@@ -414,7 +585,18 @@ module.exports = function attach(app) {
         });
         const data = json.data || {};
         for (const f of data.files || []) {
-          if (f.type === 'folder') folders.push({ token: f.token, name: f.name || '未命名文件夹' });
+          if (f.type === 'folder') {
+            folders.push({ token: f.token, name: f.name || '未命名文件夹' });
+          } else if (
+            f.type === 'shortcut' &&
+            f.shortcut_info &&
+            f.shortcut_info.target_type === 'folder' &&
+            f.shortcut_info.target_token
+          ) {
+            // 指向文件夹的快捷方式：常见做法是把别人共享给你的文件夹「添加到我的空间」，
+            // 展开成目标文件夹，这样共享文件夹也能在列表里直接选到。
+            folders.push({ token: f.shortcut_info.target_token, name: f.name || '未命名文件夹', viaShortcut: true });
+          }
         }
         pageToken = data.next_page_token || '';
         if (!data.has_more || !pageToken) break;
@@ -423,6 +605,29 @@ module.exports = function attach(app) {
       res.json({ folderToken, folders });
     } catch (e) {
       res.status(e.status || 500).json({ error: e.message || '读取文件夹失败' });
+    }
+  });
+
+  // 解析「共享文件夹链接 / token」→ 返回 folderToken + 文件夹名。
+  // 用于把浏览起点切换到一个不在「我的空间」下的文件夹（共享给本人的、共享空间的等）。
+  app.get('/api/cloud/folder-meta', async (req, res) => {
+    try {
+      const token = await getValidToken();
+      const folderToken = parseFolderRef(req.query.ref);
+      if (!folderToken) {
+        return res.status(400).json({
+          error: '无法识别文件夹：请粘贴形如 https://xxx.feishu.cn/drive/folder/<token> 的链接，或直接粘贴文件夹 token',
+        });
+      }
+      const json = await callOpenApi(
+        'GET',
+        `/drive/explorer/v2/folder/${encodeURIComponent(folderToken)}/meta`,
+        { token }
+      );
+      const d = json.data || {};
+      res.json({ folderToken, name: d.name || '未命名文件夹' });
+    } catch (e) {
+      res.status(e.status || 500).json({ error: e.message || '解析文件夹失败' });
     }
   });
 
@@ -460,14 +665,56 @@ module.exports = function attach(app) {
 
         const token = await getValidToken();
         const folderToken = String(req.query.folder_token || '');
+        const folderName = String(req.query.folder_name || '');
+        const baseId = String(req.query.cfg_key || '');
         const result = await uploadFile({ token, folderToken, fileName, buffer: buf });
-        res.json({ ok: true, ...result });
+
+        // 推送成功后再通知自动化；通知失败不回滚已上传的文件，只把原因回报给前端
+        const pusher = loadToken()?.user?.name || '';
+        const webhook = await sendAutomationWebhook({
+          baseId,
+          fileName: result.name || fileName,
+          pusher,
+          fileUrl: result.url || '',
+          folderName,
+        });
+
+        res.json({ ok: true, ...result, pusher, webhook });
       } catch (e) {
         res.status(e.status || 500).json({ error: e.message || '推送失败' });
       }
     }
   );
+
+  // 试发一次自动化通知（设置面板「测试发送」用；可传尚未保存的地址与模板）
+  app.post('/api/cloud/webhook/test', jsonBody, async (req, res) => {
+    try {
+      const body = req.body || {};
+      const out = await sendAutomationWebhook({
+        baseId: String(body.baseId || ''),
+        fileName: '测试文件.docx',
+        pusher: loadToken()?.user?.name || '测试用户',
+        fileUrl: '',
+        folderName: '测试文件夹',
+        override: {
+          webhookUrl: typeof body.webhookUrl === 'string' ? body.webhookUrl : undefined,
+          bodyTemplate: typeof body.bodyTemplate === 'string' ? body.bodyTemplate : undefined,
+        },
+      });
+      if (out.skipped) return res.status(400).json({ error: '尚未配置 Webhook 地址' });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e.message || '试发失败' });
+    }
+  });
 };
+
+// 供单元测试直接引用（不影响正常挂载使用）
+module.exports.renderBodyTemplate = renderBodyTemplate;
+module.exports.resolveWebhookConfig = resolveWebhookConfig;
+module.exports.sendAutomationWebhook = sendAutomationWebhook;
+module.exports.parseFolderRef = parseFolderRef;
+module.exports.DEFAULT_BODY_TEMPLATE = DEFAULT_BODY_TEMPLATE;
 
 // 授权回跳结果页（纯静态 HTML，无外部资源）
 function callbackPage(ok, title, detail) {
