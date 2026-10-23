@@ -5,5 +5,10 @@
 
 # Windows 批处理必须 CRLF：LF 行尾会让 cmd.exe 解析异常
 # （goto 找不到标签、脚本中途退出，且没有任何报错信息）
+# 注意 *.cmd 的规则只作用于 Windows 批处理；macOS 的 .command 在下面单独声明。
 *.bat text eol=crlf
 *.cmd text eol=crlf
+
+# macOS 双击入口（.command）本质是 bash 脚本，必须 LF。
+# .gitattributes 按「最后匹配生效」，所以这条必须放在 *.cmd 之后。
+*.command text eol=lf
